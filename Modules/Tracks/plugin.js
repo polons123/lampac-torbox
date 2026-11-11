@@ -295,6 +295,37 @@
     listenStart();
   }
 
+  function appendSwarmStat(html, element) {
+    if (!element || !element.url) return;
+    var block = Lampa.Template.get('tracks_metainfo_block', {});
+    block.find('.tracks-metainfo__label').text(Lampa.Lang.translate('tracks_swarm'));
+    var item = $('<div class="tracks-metainfo__item tracks-metainfo__item--swarm"><div class="tracks-metainfo__column--name">' + Lampa.Lang.translate('tracks_swarm_loading') + '</div></div>');
+    block.find('.tracks-metainfo__info').append(item);
+    html.prepend(block);
+    var net = new Lampa.Reguest();
+    net.timeout(1000 * 15);
+    var url = connect_host + '/tracks/stat?media=' + encodeURIComponent(element.url);
+    var email = Lampa.Storage.get('account_email');
+    if (email) url = Lampa.Utils.addUrlComponent(url, 'account_email=' + encodeURIComponent(email));
+    var uid = Lampa.Storage.get('lampac_unic_id', '');
+    if (uid) url = Lampa.Utils.addUrlComponent(url, 'uid=' + encodeURIComponent(uid));
+    var token = '{token}';
+    if (token != '') url = Lampa.Utils.addUrlComponent(url, 'token={token}');
+    net["native"](url, function (str) {
+      var st = {};
+      try {
+        st = JSON.parse(str);
+      } catch (e) { }
+      if (st.total === undefined) return block.remove();
+      item.empty();
+      item.append($('<div></div>').text(Lampa.Lang.translate('tracks_peers') + ': ' + st.active + ' / ' + st.total));
+    }, function () {
+      block.remove();
+    }, false, {
+      dataType: 'text'
+    });
+  }
+
   function parseMetainfo(data) {
     var loading = Lampa.Template.get('tracks_loading');
     data.item.after(loading);
@@ -382,6 +413,7 @@
 
         if (video.length || audio.length || subs.length) {
           data.item.after(html);
+          appendSwarmStat(html, data.element);
         }
 
         if (Lampa.Controller.enabled().name == 'modal') Lampa.Controller.toggle('modal');
@@ -399,6 +431,11 @@
     if (data.type == 'render' && data.items.length == 1 && list_opened) {
       parseMetainfo(data);
     }
+  });
+  Lampa.Lang.add({
+    tracks_swarm: { ru: 'Раздача', uk: 'Роздача', en: 'Swarm' },
+    tracks_swarm_loading: { ru: 'Проверка раздачи...', uk: 'Перевірка роздачі...', en: 'Checking swarm...' },
+    tracks_peers: { ru: 'Пиры (активные / всего)', uk: 'Піри (активні / усього)', en: 'Peers (active / total)' }
   });
   Lampa.Lang.add({
     tracks_nometa: {

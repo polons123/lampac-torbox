@@ -5,6 +5,8 @@ using Shared.Attributes;
 using Shared.Services;
 using Shared.Services.Utilities;
 using System;
+using System.Collections.Concurrent;
+using System.Threading;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -15,6 +17,9 @@ namespace Tracks;
 
 public class TracksController : BaseController
 {
+    // single-flight: identical concurrent ffprobe requests run once, the rest reuse the result
+    static readonly ConcurrentDictionary<string, SemaphoreSlim> ffprobeGates = new();
+
     [HttpGet, AllowAnonymous]
     [Staticache(cacheMinutes: 10, always: true, setHeadersNoCache: true)]
     [Route("tracks.js")]
@@ -77,7 +82,12 @@ public class TracksController : BaseController
         string argumentList = string.Empty;
 
         string memKey = $"tracks:ffprobe:{media}";
-        if (!hybridCache.TryGetValue(memKey, out string outPut))
+        string outPut = null;
+        var gate = ffprobeGates.GetOrAdd(memKey, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync();
+        try
+        {
+        if (!hybridCache.TryGetValue(memKey, out outPut))
         {
             #region getFolder
             static string getFolder(string magnethash)
@@ -118,26 +128,40 @@ public class TracksController : BaseController
                     (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
                     return ContentTo(showerror ? "uri" : "{}");
 
-                var process = new System.Diagnostics.Process();
-                process.StartInfo.UseShellExecute = false;
-                process.StartInfo.RedirectStandardOutput = true;
-                process.StartInfo.StandardOutputEncoding = Encoding.UTF8;
-                process.StartInfo.FileName = CoreInit.Win32NT ? "data/ffprobe.exe" : System.IO.File.Exists("data/ffprobe") ? "data/ffprobe" : "ffprobe";
+                // retry quick failures (transient TorrServer 5xx): up to 3 attempts, 500ms/1000ms backoff;
+                // a slow empty result (dead torrent) is not retried
+                for (int attempt = 1; attempt <= 3; attempt++)
+                {
+                    var started = DateTime.UtcNow;
+                    var process = new System.Diagnostics.Process();
+                    process.StartInfo.UseShellExecute = false;
+                    process.StartInfo.RedirectStandardOutput = true;
+                    process.StartInfo.StandardOutputEncoding = Encoding.UTF8;
+                    process.StartInfo.FileName = CoreInit.Win32NT ? "data/ffprobe.exe" : System.IO.File.Exists("data/ffprobe") ? "data/ffprobe" : "ffprobe";
 
-                process.StartInfo.ArgumentList.Add("-v");
-                process.StartInfo.ArgumentList.Add("quiet");
-                process.StartInfo.ArgumentList.Add("-print_format");
-                process.StartInfo.ArgumentList.Add("json");
-                process.StartInfo.ArgumentList.Add("-show_format");
-                process.StartInfo.ArgumentList.Add("-show_streams");
-                process.StartInfo.ArgumentList.Add(AccsDbInvk.Args(uri.AbsoluteUri, HttpContext));
+                    process.StartInfo.ArgumentList.Add("-v");
+                    process.StartInfo.ArgumentList.Add("quiet");
+                    process.StartInfo.ArgumentList.Add("-print_format");
+                    process.StartInfo.ArgumentList.Add("json");
+                    process.StartInfo.ArgumentList.Add("-show_format");
+                    process.StartInfo.ArgumentList.Add("-show_streams");
+                    process.StartInfo.ArgumentList.Add(AccsDbInvk.Args(uri.AbsoluteUri, HttpContext));
 
-                argumentList = process.StartInfo.FileName + " " + string.Join(" ", process.StartInfo.ArgumentList);
+                    argumentList = process.StartInfo.FileName + " " + string.Join(" ", process.StartInfo.ArgumentList);
 
-                process.Start();
+                    process.Start();
 
-                outPut = await process.StandardOutput.ReadToEndAsync();
-                await process.WaitForExitAsync();
+                    outPut = await process.StandardOutput.ReadToEndAsync();
+                    await process.WaitForExitAsync();
+
+                    if (!string.IsNullOrWhiteSpace(outPut) && Regex.Replace(outPut, "[\n\r\t ]+", "") != "{}")
+                        break;
+
+                    if (attempt == 3 || (DateTime.UtcNow - started).TotalSeconds > 5)
+                        break;
+
+                    await Task.Delay(500 * attempt);
+                }
 
                 if (outPut == null)
                     outPut = string.Empty;
@@ -156,7 +180,56 @@ public class TracksController : BaseController
                 }
             }
         }
+        }
+        finally
+        {
+            gate.Release();
+            if (gate.CurrentCount == 1)
+                ffprobeGates.TryRemove(memKey, out _);
+        }
 
         return ContentTo(string.IsNullOrEmpty(outPut) ? (showerror ? argumentList : "{}") : outPut);
+    }
+
+    [HttpGet]
+    [Route("tracks/stat")]
+    async public Task<ActionResult> Stat(string media)
+    {
+        string hash = Regex.Match(media ?? string.Empty, "(?:link=|/lite/pidtor/s)([a-f0-9]{40})", RegexOptions.IgnoreCase).Groups[1].Value.ToLower();
+        if (hash == string.Empty || string.IsNullOrWhiteSpace(ModInit.conf.tsstat))
+            return ContentTo("{}");
+
+        string memKey = $"tracks:stat:{hash}";
+        if (hybridCache.TryGetValue(memKey, out string cached))
+            return ContentTo(cached);
+
+        try
+        {
+            using var http = new System.Net.Http.HttpClient() { Timeout = TimeSpan.FromSeconds(12) };
+            if (!string.IsNullOrWhiteSpace(ModInit.conf.tsauth))
+                http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(ModInit.conf.tsauth)));
+
+            string url = $"{ModInit.conf.tsstat.TrimEnd('/')}/stream/stat.mkv?link={hash}&index=1&stat";
+            string json = await http.GetStringAsync(url);
+
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var r = doc.RootElement;
+            long num(string n) => r.TryGetProperty(n, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.Number ? (long)v.GetDouble() : 0;
+
+            string outPut = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                seeders = num("connected_seeders"),
+                active = num("active_peers"),
+                total = num("total_peers"),
+                speed = (long)(r.TryGetProperty("download_speed", out var sp) && sp.ValueKind == System.Text.Json.JsonValueKind.Number ? sp.GetDouble() : 0)
+            });
+
+            hybridCache.Set(memKey, outPut, DateTime.Now.AddSeconds(20), inmemory: true);
+            return ContentTo(outPut);
+        }
+        catch
+        {
+            return ContentTo("{}");
+        }
     }
 }
