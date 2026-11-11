@@ -52,6 +52,7 @@ public class Result
     public string Title { get; set; }
     public long? Size { get; set; }
     public int Seeders { get; set; }
+    public int Peers { get; set; }
     public string MagnetUri { get; set; }
     public Info info { get; set; }
 

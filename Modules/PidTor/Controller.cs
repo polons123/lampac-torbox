@@ -25,6 +25,9 @@ namespace PidTor;
 
 public class PiTor : BaseOnlineController
 {
+    // local patch: tracker names for the second line of the list and the client-side tracker filter
+    static string trackerName(Torrent t) => string.Join("+", (t.torrent?.Tracker ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(i => i.ToLower()).Distinct());
+
     [HttpGet, Staticache(manually: true)]
     [Route("lite/pidtor")]
     async public Task<ActionResult> Index(string title, string original_title, short year, string original_language, byte serial, short s = -1, bool rjson = false)
@@ -59,9 +62,6 @@ public class PiTor : BaseOnlineController
                     continue;
 
                 string tracker = torrent.Tracker;
-                if (tracker == "selezen")
-                    continue;
-
                 if (init.max_serial_size > 0 && init.max_size > 0)
                 {
                     if (serial == 1)
@@ -336,7 +336,7 @@ public class PiTor : BaseOnlineController
                         stpl.Append(
                             torrent.voice,
                             null,
-                            $"{torrent.quality} / {torrent.mediainfo} / {torrent.sid}",
+                            $"{torrent.quality} / {torrent.mediainfo} / {trackerName(torrent)} / S {torrent.sid} / P {torrent.torrent?.Peers ?? 0}",
                             accsArgs($"{host}/lite/pidtor/serial/{hashmagnet}?{torrent.tr}&rjson={rjson}&title={en_title}&original_title={en_original_title}&s={s}")
                         );
                     }
@@ -357,7 +357,7 @@ public class PiTor : BaseOnlineController
                     mtpl.Append(
                         torrent.voice,
                         accsArgs($"{host}/lite/pidtor/s{hashmagnet}?{torrent.tr}") + (ModInit.conf.gst ? "&.m3u8" : ""),
-                        voice_name: $"{torrent.quality} / {torrent.mediainfo} / {torrent.sid}",
+                        voice_name: $"{torrent.quality} / {torrent.mediainfo} / {trackerName(torrent)} / S {torrent.sid} / P {torrent.torrent?.Peers ?? 0}",
                         quality: torrent.quality.Replace("p", ""),
                         hls_manifest_timeout: (int)TimeSpan.FromSeconds(60).TotalMilliseconds
                     );
