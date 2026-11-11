@@ -26,8 +26,8 @@ echo ">> [1/3] штатное обновление через install.sh --tag $
 LAMPAC_GITHUB_REPO="$REPO" bash "$INSTALLER" --update --tag "$TAG" --force < /dev/null
 
 echo ">> [2/3] файлы, которые install.sh не синхронизирует (mods/, wwwroot/)"
-curl -fSL --retry 3 -o "$work/app.zip" "${ASSET_URL}/${ZIP_NAME}"
-curl -fSL --retry 3 -o "$work/overlay.sha256" "${ASSET_URL}/overlay.sha256"
+curl -fsSL --retry 3 -o "$work/app.zip" "${ASSET_URL}/${ZIP_NAME}"
+curl -fsSL --retry 3 -o "$work/overlay.sha256" "${ASSET_URL}/overlay.sha256"
 mkdir -p "$work/app"
 unzip -oq "$work/app.zip" -d "$work/app"
 mapfile -t tops < <(find "$work/app" -mindepth 1 -maxdepth 1 -type d)
