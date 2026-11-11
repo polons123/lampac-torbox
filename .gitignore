@@ -378,3 +378,19 @@ healthchecksdb
 site/node_modules/
 site/dist/
 site/.astro/
+
+# --- lampac-torbox: локальные правила ---
+# Действующие данные серверов и секреты. В репозиторий не попадают.
+/init.conf
+/base.conf
+/current.conf
+/passwd
+/torbox-private.json
+/torbox-settings.json
+/database/
+/data/
+/cache/
+# wwwroot собирается на сервере; наши клиентские файлы лежат в local/wwwroot
+/wwwroot/
+# Результаты local/build-release.sh
+/dist/
