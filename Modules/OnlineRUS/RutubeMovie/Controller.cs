@@ -71,7 +71,7 @@ public class RutubeMovieController : BaseOnlineController
                             name.Contains("серия") || name.Contains("серий"))
                             continue;
 
-                        if (movie.category.id == 4)
+                        if (movie.category != null && (movie.category.id == 4 || movie.category.id == 13))
                         {
                             if (movie.is_hidden || movie.is_deleted || movie.is_adult || movie.is_locked || movie.is_audio || movie.is_paid || movie.is_livestream)
                                 continue;
