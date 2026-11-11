@@ -214,7 +214,14 @@ public class AdminPanelController : BaseController
     static async Task WriteInitAtomicAsync(string formatted)
     {
         var tmp = InitFile + ".tmp";
-        await System.IO.File.WriteAllTextAsync(tmp, formatted, Encoding.UTF8).ConfigureAwait(false);
+        // Local privacy fix: create secrets with 0600 before writing their contents.
+        var options=new FileStreamOptions { Mode=FileMode.Create, Access=FileAccess.Write, Share=FileShare.None };
+        if(!OperatingSystem.IsWindows())options.UnixCreateMode=UnixFileMode.UserRead|UnixFileMode.UserWrite;
+        await using(var output=new FileStream(tmp,options)) {
+            if(!OperatingSystem.IsWindows())System.IO.File.SetUnixFileMode(tmp,UnixFileMode.UserRead|UnixFileMode.UserWrite);
+            await using var writer=new StreamWriter(output,Encoding.UTF8);
+            await writer.WriteAsync(formatted).ConfigureAwait(false);
+        }
         try
         {
             try
@@ -223,6 +230,7 @@ public class AdminPanelController : BaseController
             }
             catch (IOException ex) when (IsReplaceTargetBusy(ex))
             {
+                if(!OperatingSystem.IsWindows())System.IO.File.SetUnixFileMode(InitFile,UnixFileMode.UserRead|UnixFileMode.UserWrite);
                 await System.IO.File.WriteAllTextAsync(InitFile, formatted, Encoding.UTF8).ConfigureAwait(false);
             }
         }
