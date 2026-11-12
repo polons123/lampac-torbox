@@ -32,6 +32,7 @@ fi
 
 map_path() {
   case "$1" in
+    local/lampac-postupdate-check.py) printf 'release-tools/lampac-postupdate-check.py\n' ;;
     local/wwwroot/*)  printf 'wwwroot/%s\n'   "${1#local/wwwroot/}" ;;
     Modules/TorBox/*) printf 'mods/TorBox/%s\n' "${1#Modules/TorBox/}" ;;
     Modules/*)        printf 'module/%s\n'    "${1#Modules/}" ;;
@@ -111,11 +112,12 @@ fi
   echo "upstream_repo=$UPSTREAM_REPO"
   echo "base=$BASE"
   echo "ref=$REF"
-  echo "commit=$(git -C "$REPO_ROOT" rev-parse --short "$REF")"
+  echo "commit=$(git -C "$REPO_ROOT" rev-parse "$REF")"
   echo "built=$(date -u +%FT%TZ)"
   echo "overlay_files=$applied"
   echo "skipped_local_paths=$skipped"
   echo "zip_sha256=$(sha256sum "$REPO_ROOT/dist/$ZIP_NAME" | cut -d' ' -f1)"
+  echo "overlay_sha256=$(sha256sum "$REPO_ROOT/dist/overlay.sha256" | cut -d' ' -f1)"
 } > "$REPO_ROOT/dist/build-info.txt"
 
 echo ">> наложено файлов: $applied (пропущено служебных: $skipped)"
