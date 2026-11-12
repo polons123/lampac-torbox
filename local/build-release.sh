@@ -112,7 +112,7 @@ fi
   echo "upstream_repo=$UPSTREAM_REPO"
   echo "base=$BASE"
   echo "ref=$REF"
-  echo "commit=$(git -C "$REPO_ROOT" rev-parse "$REF")"
+  echo "commit=$(git -C "$REPO_ROOT" rev-parse "$REF^{commit}")"
   echo "built=$(date -u +%FT%TZ)"
   echo "overlay_files=$applied"
   echo "skipped_local_paths=$skipped"
