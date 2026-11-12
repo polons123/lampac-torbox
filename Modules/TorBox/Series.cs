@@ -91,6 +91,7 @@ public partial class TorBoxController
     }
     object SeriesInfo(string session,SeriesSession state,int index,int version=-1) => new {
         session, selected_index=index, version=state.Version, title=state.Title, selection=state.Selection,
+        release=state.Episodes[index].Pick.Name, file=state.Episodes[index].Name,
         next_season=0, next_index=state.Episodes.Count, season_only=true,
         items=version==state.Version?null:state.Episodes.Select((e,i)=>new{index=i,title=EpisodeTitle(e),season=e.Season,episode=e.Episode}).ToArray()
     };

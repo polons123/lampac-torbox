@@ -27,6 +27,45 @@
   function keyIdentity() {
     return base + '|' + Lampa.Storage.get('account_email', '') + '|' + Lampa.Storage.get('lampac_unic_id', '');
   }
+  window.lampac_torbox_identity = keyIdentity;
+  var playbackRows = [];
+  function playbackStore() { return 'torbox_playback_' + Lampa.Utils.hash(keyIdentity()); }
+  function playbackPreference() {
+    var saved = Lampa.Storage.get(playbackStore(), {});
+    return saved && saved.identity === keyIdentity() ? saved.value : null;
+  }
+  window.lampac_torbox_remember_playback = function (value, url, identity) {
+    if (!torboxAddress(url) || identity !== keyIdentity() || !value || typeof value.resolution !== 'number') return false;
+    if (JSON.stringify(value).length > 4096) return false;
+    Lampa.Storage.set(playbackStore(), { identity: identity, value: value });
+    var actual = playbackPreference();
+    var saved = !!actual && JSON.stringify(actual) === JSON.stringify(value);
+    renderPlaybackRows();
+    return saved;
+  };
+  function playbackLabel() {
+    var saved = playbackPreference();
+    if (!saved) return 'Нет сохранённых параметров';
+    function track(row) { return row ? [row.language || '', row.title || ''].filter(Boolean).join(' · ') : 'Звук по умолчанию'; }
+    return (saved.resolution === 0 ? 'Исходное разрешение' : saved.resolution + 'p') + ' · ' + track(saved.audio) + ' · ' + (saved.subtitle ? track(saved.subtitle) : 'Без субтитров');
+  }
+  function renderPlaybackRows() {
+    playbackRows = playbackRows.filter(function (row) { return $.contains(document, row[0]); });
+    playbackRows.forEach(function (row) { row.find('.settings-param__value').text(playbackLabel()); });
+  }
+  window.lampac_torbox_playback_status = function () { return { saved: !!playbackPreference(), label: playbackLabel() }; };
+  function playbackHeaders(headers, url) {
+    var target = document.createElement('a'); target.href = String(url || '');
+    if (!/^\/lite\/torbox(?:\/choose)?$/.test(target.pathname)) return headers;
+    var saved = playbackPreference();
+    if (saved && typeof saved === 'object') {
+      try {
+        var encoded = btoa(unescape(encodeURIComponent(JSON.stringify(saved))));
+        if (encoded.length <= 8192) headers['X-TorBox-Playback'] = encoded;
+      } catch (e) { }
+    }
+    return headers;
+  }
   function keyStore(value, done, profile) {
     var identity = keyIdentity() + (profile ? "|config" : "");
     if (value === undefined && Object.prototype.hasOwnProperty.call(keyCache, identity)) return done(null, keyCache[identity]);
@@ -83,7 +122,7 @@
     var identity = keyIdentity();
     getPolicy(function (policy) {
       if (!policy || identity !== keyIdentity()) return done({ 'X-TorBox-Mode': 'unavailable' });
-      if (!policy.client_available) return done({ 'X-TorBox-Mode': 'file' });
+      if (!policy.client_available) return done(playbackHeaders({ 'X-TorBox-Mode': 'file' }, url));
       clientSettings(function (error, profile, key) {
         if (error || identity !== keyIdentity()) return done({ 'X-TorBox-Mode': 'unavailable' });
         var mode = configMode(profile, policy);
@@ -95,7 +134,7 @@
           if (profile.jacred_url || profile.jacred_key) config.jacred = { base_url: profile.jacred_url || '', api_key: profile.jacred_key || '' };
           headers['X-TorBox-Config'] = btoa(unescape(encodeURIComponent(JSON.stringify(config))));
         }
-        done(headers);
+        done(playbackHeaders(headers, url));
       });
     });
   };
@@ -181,6 +220,16 @@
   }
   function addTorBoxSettings() {
     Lampa.SettingsApi.addComponent({ component: 'torbox', name: 'TorBox', icon: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M19 10h-.3A7 7 0 0 0 5.2 8.2 5 5 0 0 0 6 18h13a4 4 0 0 0 0-8M10 15V9l5 3z"/></svg>' });
+    Lampa.SettingsApi.addParam({ component: 'torbox', param: { type: 'button' },
+      field: { name: 'Сохранённые параметры', description: 'В «Онлайн → TorBox» запоминаются после выбора качества, озвучки и субтитров. Для неподходящих дорожек остаётся ручной выбор' },
+      onChange: function () { Lampa.Noty.show(playbackLabel()); },
+      onRender: function (item) {
+        if (!item.find('.settings-param__value').length) $('<div class="settings-param__value">').insertAfter(item.find('.settings-param__name'));
+        playbackRows.push(item);item.find('.settings-param__value').text(playbackLabel());
+      } });
+    Lampa.SettingsApi.addParam({ component: 'torbox', param: { type: 'button' },
+      field: { name: 'Сбросить параметры воспроизведения', description: 'Забыть сохранённые качество, озвучку и субтитры для этого пользователя и сервера' },
+      onChange: function () { Lampa.Storage.set(playbackStore(), {}); renderPlaybackRows(); Lampa.Noty.show('Сохранённые параметры воспроизведения сброшены'); } });
     [{ name: 'mode', title: 'Источник настроек', description: 'Источник задаёт администратор через allow_client_credentials' }].concat(settingFields).forEach(function (field) {
       Lampa.SettingsApi.addParam({ component: 'torbox', param: { type: 'button' },
         field: { name: field.title, description: field.description },
@@ -773,7 +822,7 @@
     function cell(row) {
       var title = (info.title || '') + ' · ' + row.season + ' сезон · ' + row.episode + ' серия';
       var identity = movie.original_name || movie.original_title || movie.id || info.title;
-      return { title: title, season: row.season, episode: row.episode, voice_name: info.selection,
+      return { title: title, season: row.season, episode: row.episode, voice_name: info.selection + (info.release ? ' · Раздача: ' + info.release : ''),
         torbox_session: run.session, isonline: true, quality: {}, hls_manifest_timeout: 60000,
         timeline: Lampa.Timeline.view(Lampa.Utils.hash([row.season, row.season > 10 ? ':' : '', row.episode, identity].join('')),
           Lampa.Timeline.link ? Lampa.Timeline.link(movie, row.season, row.episode) : null) };

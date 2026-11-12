@@ -67,6 +67,14 @@
       network[method] = function () {
         var args = Array.prototype.slice.call(arguments);
         var requestGeneration = generation;
+        if (/\/(?:torbox\/|lite\/torbox(?:[/?]|$))/.test(String(args[0])) && typeof args[1] === 'function') {
+          var owner = Lampa.Storage.get('account_email', '') + '|' + Lampa.Storage.get('lampac_unic_id', '');
+          var ready = args[1];
+          args[1] = function () {
+            if (requestGeneration !== generation || owner !== Lampa.Storage.get('account_email', '') + '|' + Lampa.Storage.get('lampac_unic_id', '')) return;
+            return ready.apply(this, arguments);
+          };
+        }
         if (!window.lampac_torbox_headers) return send.apply(network, args);
         window.lampac_torbox_headers(args[0], function (headers) {
           if (requestGeneration !== generation) return;
@@ -313,7 +321,10 @@
               pf_hdr: '',
               pf_voice: '',
               pf_tr: '',
-              torbox_voice: ''
+              torbox_voice: '',
+              torbox_season: 0,
+              torbox_episode: 0,
+              torbox_res: '', torbox_hdr: '', torbox_codec: '', torbox_size: ''
             });
             setTimeout(function () {
               Lampa.Select.close();
@@ -322,6 +333,16 @@
                 similar: 0
               });
             }, 10);
+          } else if (a.stype && a.stype.indexOf('tb_filter_') === 0 && torboxVoiceMenu) {
+            var filterChoice = _this.getChoice('torbox');
+            filterChoice['torbox_' + a.stype.slice(10)] = b.value;
+            _this.saveChoice(filterChoice, 'torbox');
+            var filteredUrl = _this.torboxVoiceUrl(torboxVoiceMenu.search);
+            Lampa.Select.close();
+            _this.reset();
+            _this.request(filteredUrl);
+          } else if (a.stype === 'torbox_episode' && torboxVoiceMenu) {
+            _this.torboxSelectEpisode(b.clear);
           } else if (a.stype === 'torbox_voice' && torboxVoiceMenu) {
             var voiceChoice = _this.getChoice();
             voiceChoice.torbox_voice = b.voice;
@@ -720,6 +741,7 @@
     // ── play / quality ──
     this.getFileUrl = function (file, call, waiting_rch) {
       var _this = this;
+      var preferenceIdentity = window.lampac_torbox_identity ? window.lampac_torbox_identity() : '';
 
       if (Lampa.Storage.field('player') !== 'inner' && file.stream && Lampa.Platform.is('apple')) {
         var newfile = Lampa.Arrays.clone(file);
@@ -751,6 +773,8 @@
               }
             } else {
               Lampa.Loading.stop();
+              if (json.success && json.torbox_stream && file.torbox_playback && window.lampac_torbox_remember_playback)
+                window.lampac_torbox_remember_playback(file.torbox_playback, file.url, preferenceIdentity);
               call(json, json);
             }
           },
@@ -1054,7 +1078,85 @@
     };
     // TorBox selection menus use the same TMDB stills as episode cards.
     var torboxVoiceMenu = null;
+    this.torboxChosenBanner = function (row) {
+      if (balanser !== 'torbox' || !row || !row.torbox_chosen) return;
+      var chosen = row.torbox_chosen;
+      scroll.append($('<div class="torbox-chosen-release" style="padding:.5em 0;overflow-wrap:anywhere"></div>').text(
+        (chosen.fallback ? 'Открыта другая готовая раздача: ' : 'Раздача: ') + chosen.release + (chosen.file ? ' · Файл: ' + chosen.file : '')));
+      if (row.torbox_preference_notice) scroll.append($('<div class="torbox-preference-notice" style="opacity:.8;margin-bottom:.5em"></div>').text(row.torbox_preference_notice));
+      if (row.method === 'call' && /\/lite\/torbox\/play(?:\?|$)/.test(String(row.url))) {
+        var notice;
+        if (!window.lampac_torbox_remember_playback || !window.lampac_torbox_playback_status || !window.lampac_torbox_identity)
+          notice = 'Модуль TorBox не обновлён. Полностью перезагрузите страницу, чтобы сохранять параметры.';
+        else if (!row.torbox_playback)
+          notice = 'У выбранных дорожек нет достаточных данных для запоминания. При следующем открытии понадобится ручной выбор.';
+        else {
+          var saved = window.lampac_torbox_remember_playback(row.torbox_playback, row.url, window.lampac_torbox_identity());
+          notice = saved ? 'Параметры сохранены на этом устройстве. При следующем открытии подходящего файла выберите «Сохранённые параметры».' :
+            'Не удалось сохранить параметры на устройстве. Проверьте доступ к хранилищу браузера и адрес сервера.';
+        }
+        scroll.append($('<div class="torbox-playback-status" style="opacity:.8;margin-bottom:.5em"></div>').text(notice));
+      }
+    };
+    var torboxFilterTitles = { res: 'Разрешение', hdr: 'HDR / Dolby Vision', codec: 'Кодек', size: 'Размер раздачи' };
+    this.torboxFilterUrl = function (url) {
+      if (balanser !== 'torbox' || !/\/lite\/torbox(?:\?|$)/.test(String(url))) return url;
+      var choice = this.getChoice('torbox');
+      Object.keys(torboxFilterTitles).forEach(function (key) {
+        var name = 'tb_' + key, value = encodeURIComponent(choice['torbox_' + key] || '');
+        var pattern = new RegExp('([?&])' + name + '=[^&]*');
+        url = pattern.test(url) ? url.replace(pattern, '$1' + name + '=' + value) : Lampa.Utils.addUrlComponent(url, name + '=' + value);
+      });
+      return url;
+    };
+    this.torboxEpisodeUrl = function (url, season, episode) {
+      if (balanser !== 'torbox' || !/\/lite\/torbox(?:\?|$)/.test(String(url))) return url;
+      var choice = this.getChoice('torbox');
+      [['tb_season', typeof season === 'number' ? season : choice.torbox_season || 0],
+        ['tb_episode', typeof episode === 'number' ? episode : choice.torbox_episode || 0]].forEach(function (pair) {
+        var pattern = new RegExp('([?&])' + pair[0] + '=[^&]*');
+        url = pattern.test(url) ? url.replace(pattern, '$1' + pair[0] + '=' + pair[1]) : Lampa.Utils.addUrlComponent(url, pair[0] + '=' + pair[1]);
+      });
+      return url;
+    };
+    this.torboxSelectEpisode = function (clear) {
+      var self = this, menu = torboxVoiceMenu;
+      function apply(season, episode) {
+        if (torboxVoiceMenu !== menu || balanser !== 'torbox') return;
+        var choice = self.getChoice('torbox');
+        choice.torbox_season = season;
+        choice.torbox_episode = episode;
+        self.saveChoice(choice, 'torbox');
+        var url = self.torboxEpisodeUrl(menu.search, season, episode);
+        Lampa.Select.close();
+        self.reset();
+        self.request(url);
+      }
+      if (clear) return apply(0, 0);
+      var seasons = (menu.seasons || []).slice();
+      (object.movie.seasons || []).forEach(function (season) { if (season.season_number > 0) seasons.push(season.season_number); });
+      for (var s = 1; s <= Math.min(object.movie.number_of_seasons || 0, 99); s++) seasons.push(s);
+      seasons = seasons.filter(function (s, i, all) { return s > 0 && s <= 99 && all.indexOf(s) === i; }).sort(function (a, b) { return a - b; });
+      if (!seasons.length) return Lampa.Noty.show('Нет данных о сезонах. Откройте раздачу и выберите файл вручную');
+      Lampa.Select.show({ title: 'Сезон', items: seasons.map(function (s) { return { title: s + ' сезон', season: s }; }),
+        onBack: function () { Lampa.Controller.toggle('content'); },
+        onSelect: function (season) {
+          Lampa.Select.close();
+          self.getEpisodes(season.season, function (episodes) {
+            if (torboxVoiceMenu !== menu || balanser !== 'torbox') return;
+            var items = episodes.filter(function (e) { return e.episode_number > 0 && e.episode_number <= 999; }).map(function (e) {
+              return { title: e.episode_number + ' серия' + (e.name ? ' · ' + escapeHtml(e.name) : ''), episode: e.episode_number };
+            });
+            if (!items.length) { Lampa.Controller.toggle('content'); return Lampa.Noty.show('Нет данных о сериях. Выберите файл в раздаче вручную'); }
+            Lampa.Select.show({ title: season.season + ' сезон · Серия', items: items,
+              onBack: function () { Lampa.Controller.toggle('content'); },
+              onSelect: function (episode) { apply(season.season, episode.episode); } });
+          });
+        } });
+    };
     this.torboxVoiceUrl = function (url, voice) {
+      url = this.torboxFilterUrl(url);
+      url = this.torboxEpisodeUrl(url);
       if (balanser !== 'torbox' || !/\/lite\/torbox(?:\?|$)/.test(String(url)) || /[?&]tb_voice=/.test(String(url))) return url;
       if (typeof voice !== 'string') voice = this.getChoice('torbox').torbox_voice || '';
       return Lampa.Utils.addUrlComponent(url, 'tb_voice=' + encodeURIComponent(voice));
@@ -1106,6 +1208,7 @@
       var tools = $('<div class="torbox-cache-tools" style="margin-bottom:1em"></div>');
       var toggle = $('<div class="simple-button selector torbox-cache-toggle" style="display:flex;align-items:center"></div>');
       var status = $('<div class="torbox-cache-info" style="font-size:.8em;opacity:.7;margin-top:.4em"></div>');
+      if (torboxVoiceMenu && torboxVoiceMenu.season) tools.append($('<div style="font-size:.8em;opacity:.7;margin-bottom:.5em"></div>').text('Кэш относится к раздаче. Наличие выбранной серии проверяется при открытии.'));
       tools.append(toggle, status);
       var empty = $('<div class="empty torbox-cache-empty" style="padding:1em"></div>').hide();
       rows[0].item.before(tools);
@@ -1153,7 +1256,9 @@
       var torboxRows = [];
       var voiceMeta = balanser === 'torbox' && json[0];
       torboxVoiceMenu = voiceMeta && Array.isArray(voiceMeta.torbox_voice_options) ? {
-        options: voiceMeta.torbox_voice_options, selected: voiceMeta.torbox_voice_selected || '', search: voiceMeta.torbox_voice_search
+        options: voiceMeta.torbox_voice_options, selected: voiceMeta.torbox_voice_selected || '', search: voiceMeta.torbox_voice_search,
+        season: voiceMeta.torbox_season || 0, episode: voiceMeta.torbox_episode || 0, seasons: voiceMeta.torbox_seasons || [],
+        filterOptions: voiceMeta.torbox_filter_options || {}, filterSelected: voiceMeta.torbox_filter_selected || {}
       } : null;
       var _this6 = this;
       if (balanser == 'pidtor') {
@@ -1162,6 +1267,7 @@
         json = pfApply(json);
       }
       scroll.clear();
+      this.torboxChosenBanner(json[0]);
       json.forEach(function (elem) {
         if (balanser === 'torbox' && elem.torbox_voice_empty) {
           scroll.append($('<div class="empty torbox-voice-empty" style="padding:1em"></div>').text(elem.text));
@@ -1317,6 +1423,15 @@
         var voiceOptions = [{ title: 'Все', voice: '', selected: !torboxVoiceMenu.selected }];
         torboxVoiceMenu.options.forEach(function (name) { voiceOptions.push({ title: escapeHtml(name), voice: name, selected: torboxVoiceMenu.selected === name }); });
         select.push({ title: 'Озвучка', subtitle: escapeHtml(torboxVoiceMenu.selected || 'Все'), items: voiceOptions, stype: 'torbox_voice' });
+        if (object.movie.name) select.push({ title: 'Серия',
+          subtitle: torboxVoiceMenu.season ? torboxVoiceMenu.season + ' сезон · ' + torboxVoiceMenu.episode + ' серия' : 'Все',
+          items: [{ title: 'Все серии', clear: true }, { title: 'Выбрать сезон и серию' }], stype: 'torbox_episode' });
+        Object.keys(torboxFilterTitles).forEach(function (key) {
+          var current = torboxVoiceMenu.filterSelected[key] || '';
+          var items = [{ title: 'Все', value: '', selected: !current }];
+          (torboxVoiceMenu.filterOptions[key] || []).forEach(function (value) { items.push({ title: escapeHtml(value), value: value, selected: value === current }); });
+          select.push({ title: torboxFilterTitles[key], subtitle: escapeHtml(current || 'Все'), items: items, stype: 'tb_filter_' + key });
+        });
       }
       if (!(balanser === 'torbox' && torboxVoiceMenu) && filter_items.voice && filter_items.voice.length) add('voice', Lampa.Lang.translate('torrent_parser_voice'));
       if (filter_items.season && filter_items.season.length)
@@ -1368,6 +1483,10 @@
         }
       }
       if (balanser === 'torbox' && torboxVoiceMenu && torboxVoiceMenu.selected) select.push('Озвучка: ' + escapeHtml(torboxVoiceMenu.selected));
+      if (balanser === 'torbox' && torboxVoiceMenu && torboxVoiceMenu.season) select.push(torboxVoiceMenu.season + ' сезон · ' + torboxVoiceMenu.episode + ' серия');
+      if (balanser === 'torbox' && torboxVoiceMenu) Object.keys(torboxFilterTitles).forEach(function (key) {
+        if (torboxVoiceMenu.filterSelected[key]) select.push(torboxFilterTitles[key] + ': ' + escapeHtml(torboxVoiceMenu.filterSelected[key]));
+      });
       if (balanser == 'pidtor')
         PF_KEYS.forEach(function (k) {
           if (need['pf_' + k]) select.push(PF_TITLE[k] + ': ' + need['pf_' + k]);
@@ -1480,6 +1599,7 @@
       }
       if (!items.length) return this.empty();
       scroll.clear();
+      this.torboxChosenBanner(items[0]);
       if (!object.balanser) scroll.append(Lampa.Template.get('lampac_prestige_watched', {}));
       this.updateWatched();
       this.getEpisodes(items[0].season, function (episodes) {
@@ -1499,6 +1619,7 @@
           var episode_num = element.episode || index + 1;
           var episode_last = choice.episodes_view[element.season];
           var voice_name =
+            (balanser === 'torbox' && element.torbox_chosen ? element.voice_name : '') ||
             choice.voice_name ||
             (filter_find.voice[0] ? filter_find.voice[0].title : false) ||
             element.voice_name ||

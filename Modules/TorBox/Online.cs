@@ -25,7 +25,7 @@ public partial class TorBoxController
     class Pick {
         public PickGroup Group = new();
         public string Owner, Link, Hash, Name, Movie, Next, SourceKey;
-        public int Quality, Seeds;
+        public int Quality, Seeds, RequestedSeason, RequestedEpisode;
         public bool Serial;
         public Pick[] SeriesPicks;
         public JToken Torrent,ReadyTorrent;
@@ -72,13 +72,15 @@ public partial class TorBoxController
         if(s.Contains("480"))return 480;
         return 360;
     }
-    static string Normalize(string s) => Regex.Replace((s??"").ToLowerInvariant(),"[^\\p{L}\\p{N}]+", " ").Trim();
+    static string Normalize(string s) => Regex.Replace((s??"").Normalize(NormalizationForm.FormKC).ToLowerInvariant().Replace('ё','е'),"[^\\p{L}\\p{N}]+", " ").Trim();
     static bool VideoName(string name) => Regex.IsMatch(name??"",@"\.(mkv|mp4|avi|m4v|mov|ts|m2ts|webm|mpg|mpeg|wmv)$",RegexOptions.IgnoreCase) && !Regex.IsMatch(name??"",@"\b(sample|trailer|трейлер)\b",RegexOptions.IgnoreCase);
     static string FileName(JToken f) => (string)f["short_name"] ?? (string)f["name"] ?? "Видео";
 
     [HttpGet, Route("lite/torbox")]
-    public Task<ActionResult> Online(string title, string original_title, int year=0, byte serial=0, bool rjson=true, long id=0, long tmdb_id=0, string source=null, string tb_voice=null) => Guard(async(c,key)=>{
+    public Task<ActionResult> Online(string title, string original_title, int year=0, byte serial=0, bool rjson=true, long id=0, long tmdb_id=0, string source=null, string tb_voice=null, int tb_season=0, int tb_episode=0, string tb_res=null, string tb_hdr=null, string tb_codec=null, string tb_size=null) => Guard(async(c,key)=>{
         if(string.IsNullOrWhiteSpace(title) && string.IsNullOrWhiteSpace(original_title))return Error(400,"Не указано название фильма");
+        if(tb_season<0 || tb_season>99 || tb_episode<0 || tb_episode>999 ||
+            (tb_season==0)!=(tb_episode==0) || (serial!=1 && tb_season>0))return Error(400,"Некорректный сезон или серия");
         string searchKey=SeriesKeyHash(metadataOwner+":"+c["jacred"]?.ToString(Newtonsoft.Json.Formatting.None))+":"+Normalize(title)+":"+Normalize(original_title)+":"+year+":"+serial;
         JArray rows;
         if(searchCache.TryGetValue(searchKey,out var hit) && hit.Expires>DateTime.UtcNow)rows=hit.Rows;
@@ -94,21 +96,46 @@ public partial class TorBoxController
             searchCache[searchKey]=(DateTime.UtcNow.AddMinutes(5),rows);
         }
         var eligible=rows.OfType<JObject>().Where(t=>!string.IsNullOrWhiteSpace((string)t["Title"]) &&
-            ((!string.IsNullOrWhiteSpace(title) && Normalize((string)t["Title"]).Contains(Normalize(title))) ||
-             (!string.IsNullOrWhiteSpace(original_title) && Normalize((string)t["Title"]).Contains(Normalize(original_title)))) &&
+            (TitleMatches((string)t["Title"],title) || TitleMatches((string)t["Title"],original_title)) &&
             !Regex.IsMatch((string)t["Title"],@"\b(CAMRip|HDCAM|HDTS|TSRip|TELESYNC)\b",RegexOptions.IgnoreCase) &&
             (serial==1 || year<=0 || !Regex.IsMatch((string)t["Title"],@"\b(19|20)\d{2}\b") || Regex.IsMatch((string)t["Title"],@"\b"+year+@"\b")))
-            .OrderByDescending(Resolution).ThenByDescending(t=>(int?)t["Seeders"]??0).ToArray();
-        if(eligible.Length==0)return Error(404,"JacRed не нашёл подходящих раздач фильма");
-        var voices=eligible.SelectMany(ReleaseVoices).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(v=>v,StringComparer.OrdinalIgnoreCase).ToArray();
+            .OrderByDescending(Resolution).ThenByDescending(t=>(int?)t["Seeders"]??0);
+        var releases=DeduplicateReleases(eligible).ToArray();
+        if(releases.Length==0)return Error(404,"JacRed не нашёл подходящих раздач фильма");
+        var voices=releases.SelectMany(ReleaseVoices).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(v=>v,StringComparer.OrdinalIgnoreCase).ToArray();
+        var filters=new JObject{["res"]=tb_res??"",["hdr"]=tb_hdr??"",["codec"]=tb_codec??"",["size"]=tb_size??""};
+        if(filters.Properties().Any(f=>((string)f.Value).Length>32))return Error(400,"Некорректный фильтр TorBox");
+        var options=new JObject();
+        foreach(var field in filters.Properties())options[field.Name]=new JArray(releases.Select(t=>ReleaseTrait(t,field.Name)).Distinct().OrderBy(v=>v,StringComparer.Ordinal));
         string selected=(tb_voice??"").Trim();
         if(selected.Length>160)return Error(400,"Слишком длинное название озвучки");
         selected=voices.FirstOrDefault(v=>string.Equals(v,selected,StringComparison.OrdinalIgnoreCase))??selected;
-        string search=host+"/lite/torbox?title="+Uri.EscapeDataString(title??"")+"&original_title="+Uri.EscapeDataString(original_title??"")+"&year="+year+"&serial="+serial+"&id="+id+"&tmdb_id="+tmdb_id+"&source="+Uri.EscapeDataString(source??"");
-        var candidates=eligible.Where(t=>selected.Length==0 || ReleaseVoices(t).Contains(selected,StringComparer.OrdinalIgnoreCase)).Take(serial==1?96:12).ToArray();
+        string search=host+"/lite/torbox?title="+Uri.EscapeDataString(title??"")+"&original_title="+Uri.EscapeDataString(original_title??"")+"&year="+year+"&serial="+serial+"&id="+id+"&tmdb_id="+tmdb_id+"&source="+Uri.EscapeDataString(source??"")+"&tb_season="+tb_season+"&tb_episode="+tb_episode;
+        foreach(var field in filters.Properties())search+="&tb_"+field.Name+"="+Uri.EscapeDataString((string)field.Value);
+        var matching=releases.Where(t=>(selected.Length==0 || ReleaseVoices(t).Contains(selected,StringComparer.OrdinalIgnoreCase)) &&
+            filters.Properties().All(f=>string.IsNullOrEmpty((string)f.Value) || ReleaseTrait(t,f.Name)==(string)f.Value)).ToArray();
+        var states=await ReleaseCacheStates(key,matching);
+        var episodeMatches=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if(tb_season>0) {
+            // Known library files can resolve an exact episode before the menu cap, without attaching torrents.
+            JArray owned=null;
+            try { owned=await OwnedTorrents(key).WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch(Exception ex) { MetadataWarning("search-episode-library",ex); }
+            foreach(var torrent in (owned??new JArray()).Where(CachedReady)) {
+                string hash=NormalizeCacheHash((string)torrent["hash"]);
+                if(hash==null)continue;
+                foreach(var row in matching.Where(t=>ReleaseHash(t)==hash))
+                    if(EpisodeFiles(new Pick{Name=(string)row["Title"]},torrent).Any(e=>e.Numbered && e.Season==tb_season && e.Episode==tb_episode))
+                        episodeMatches.Add(hash);
+            }
+        }
+        var candidates=matching.OrderByDescending(t=>episodeMatches.Contains(ReleaseHash(t)??""))
+            .ThenByDescending(t=>states.TryGetValue(ReleaseHash(t)??"",out var cached) && cached==true)
+            .ThenByDescending(Resolution).ThenByDescending(t=>(int?)t["Seeders"]??0).Take(serial==1?96:12).ToArray();
+        var seasons=releases.Select(t=>SeasonHint((string)t["Title"])).Where(s=>s>0).Distinct().OrderBy(s=>s).ToArray();
         if(candidates.Length==0) {
-            var empty=new SimilarTpl();empty.Append("По выбранной озвучке раздач нет. Выберите другую озвучку или «Все» в фильтре.",null,null,search);
-            return Content(SimilarReleaseHtml(empty,voices,selected,search,true),"text/html; charset=utf-8");
+            var empty=new SimilarTpl();empty.Append("По выбранным фильтрам раздач нет. Измените фильтры или выберите «Все».",null,null,search);
+            return Content(SimilarReleaseHtml(empty,voices,selected,search,true,tb_season,tb_episode,seasons,options,filters),"text/html; charset=utf-8");
         }
         lock(pickCacheGate) {
         foreach(var expired in picks.Where(p=>p.Value.Expires<DateTime.UtcNow).ToArray())picks.TryRemove(expired.Key,out _);
@@ -118,36 +145,170 @@ public partial class TorBoxController
             var oldest=picks.Values.OrderBy(p=>p.Group.LastUsed).First().Group;
             foreach(var entry in picks.Where(p=>p.Value.Group==oldest).ToArray())picks.TryRemove(entry.Key,out _);
         }
-        var group=new PickGroup{KeyHash=SeriesKeyHash(key)};
+        var group=new PickGroup{KeyHash=SeriesKeyHash(key),Cache=new Dictionary<string,bool?>(),
+            CacheUntil=DateTime.UtcNow.AddSeconds(states.Values.Any(v=>v.HasValue)?30:10)};
         var tpl=new SimilarTpl();
         string previous=null;
         var seriesPicks=new List<Pick>();
         for(int i=0;i<candidates.Length;i++) {
             var t=candidates[i];string link=(string)t["MagnetUri"] ?? (string)t["Link"];
             if(string.IsNullOrWhiteSpace(link))continue;
-            string hash=Regex.Match(Uri.UnescapeDataString(link),@"urn:btih:([a-z0-9]+)",RegexOptions.IgnoreCase).Groups[1].Value;
-            if(string.IsNullOrEmpty(hash))hash=(string)t["InfoHash"]??(string)t["Hash"]??"";
-            hash=NormalizeCacheHash(hash)??"";
+            string hash=ReleaseHash(t)??"";
             string ticket=Guid.NewGuid().ToString("N");
             var p=new Pick{Group=group,Owner=metadataOwner,Link=link,Hash=hash,Name=(string)t["Title"],Movie=title??original_title,Serial=serial==1,Quality=Resolution(t),Seeds=(int?)t["Seeders"]??0,
-                SourceKey=ReleaseSource(t),Film=new FilmInput{tmdb_id=tmdb_id>0 ? tmdb_id : (source=="tmdb" || source=="cub" ? id : 0),title=string.IsNullOrWhiteSpace(title)?original_title:title,original_title=original_title,year=year,media_type=serial==1?"tv":"movie"}};
+                RequestedSeason=tb_season,RequestedEpisode=tb_episode,SourceKey=ReleaseSource(t),Film=new FilmInput{tmdb_id=tmdb_id>0 ? tmdb_id : (source=="tmdb" || source=="cub" ? id : 0),title=string.IsNullOrWhiteSpace(title)?original_title:title,original_title=original_title,year=year,media_type=serial==1?"tv":"movie"}};
             picks[ticket]=p;seriesPicks.Add(p);
+            group.Cache[ticket]=states.TryGetValue(hash,out var cached)?cached:null;
             if(previous!=null)picks[previous].Next=ticket;
             previous=ticket;
-            tpl.Append(p.Name,year.ToString(),p.Quality+"p · Озвучка: "+ReleaseVoices(t)[0]+(ReleaseVoices(t).Length>1 ? " + "+(ReleaseVoices(t).Length-1) : ""),OnlineUrl("choose?pick="+ticket));
+            tpl.Append(p.Name,year.ToString(),ReleaseSummary(t)+" · Озвучка: "+ReleaseVoices(t)[0]+(ReleaseVoices(t).Length>1 ? " + "+(ReleaseVoices(t).Length-1) : ""),OnlineUrl("choose?pick="+ticket));
         }
         if(serial==1){var peers=seriesPicks.ToArray();foreach(var p in peers)p.SeriesPicks=peers;}
-        return Content(SimilarReleaseHtml(tpl,voices,selected,search),"text/html; charset=utf-8");
+        return Content(SimilarReleaseHtml(tpl,voices,selected,search,false,tb_season,tb_episode,seasons,options,filters),"text/html; charset=utf-8");
         }
     });
+
+    static double PositiveNumber(JToken value) => value!=null &&
+        double.TryParse(value.ToString(),System.Globalization.NumberStyles.Float,System.Globalization.CultureInfo.InvariantCulture,out var number) &&
+        double.IsFinite(number) && number>0 ? number : 0;
+    static string BytesLabel(double size) => size<=0 ? "Размер не указан" :
+        size>=1073741824 ? (size/1073741824).ToString("0.##",System.Globalization.CultureInfo.InvariantCulture)+" ГиБ" :
+        (size/1048576).ToString("0.##",System.Globalization.CultureInfo.InvariantCulture)+" МиБ";
+    static double DurationSeconds(JToken value) => PositiveNumber(value)>0 ? PositiveNumber(value) :
+        TimeSpan.TryParse(value?.ToString(),System.Globalization.CultureInfo.InvariantCulture,out var duration) && duration.TotalSeconds>0 ? duration.TotalSeconds : 0;
+    static string ReleaseTrait(JToken row,string field) {
+        string title=(string)row["Title"]??"";
+        if(field=="res") {
+            var match=Regex.Match(title,@"(?<!\d)(2160|1440|1080|720|576|480|360)(?:p|\b)",RegexOptions.IgnoreCase);
+            return match.Success ? match.Groups[1].Value+"p" : Regex.IsMatch(title,@"\b(4k|uhd)\b",RegexOptions.IgnoreCase)?"2160p":"Не указано";
+        }
+        if(field=="codec")return Regex.IsMatch(title,@"\b(HEVC|[xh][ ._-]?265)\b",RegexOptions.IgnoreCase)?"HEVC":
+            Regex.IsMatch(title,@"\b(AVC|[xh][ ._-]?264)\b",RegexOptions.IgnoreCase)?"AVC":
+            Regex.IsMatch(title,@"\bAV1\b",RegexOptions.IgnoreCase)?"AV1":"Не указано";
+        if(field=="hdr") {
+            bool dv=Regex.IsMatch(title,@"\b(DV|DoVi|Dolby[ ._-]*Vision)\b",RegexOptions.IgnoreCase),hdr=Regex.IsMatch(title,@"\bHDR",RegexOptions.IgnoreCase);
+            return dv ? hdr?"Dolby Vision + HDR":"Dolby Vision" :
+                Regex.IsMatch(title,@"\bHDR10(?:\+|Plus)",RegexOptions.IgnoreCase)?"HDR10+":
+                Regex.IsMatch(title,@"\bHDR10\b",RegexOptions.IgnoreCase)?"HDR10":hdr?"HDR":
+                Regex.IsMatch(title,@"\bSDR\b",RegexOptions.IgnoreCase)?"SDR":"Не указано";
+        }
+        double size=PositiveNumber(row["Size"])/1073741824;
+        return size<=0?"Не указан":size<4?"До 4 ГиБ":size<10?"4–10 ГиБ":size<25?"10–25 ГиБ":size<50?"25–50 ГиБ":"От 50 ГиБ";
+    }
+    static string ReleaseSummary(JToken row) => string.Join(" · ",new[]{ReleaseTrait(row,"res"),ReleaseTrait(row,"hdr"),ReleaseTrait(row,"codec")}
+        .Where(v=>v!="Не указано").Append(BytesLabel(PositiveNumber(row["Size"]))));
+    static JObject PlaybackTrack(JToken track) {
+        if(track is not JObject)return null;
+        var result=new JObject();
+        foreach(string field in new[]{"language","title","codec","channels","forced","hearing_impaired"}) {
+            var value=track[field];
+            if(value is JValue && value.Type!=JTokenType.Null && value.ToString().Length<=160)result[field]=value.DeepClone();
+        }
+        return result;
+    }
+    static bool KnownPlaybackTrack(JToken track) => track is JObject &&
+        (TrackLanguage(track).Length>0 || TrackPart(track,"title").Length>0);
+    static JObject PlaybackPreference(JToken data,int resolution,int audio,int sub) {
+        var selectedAudio=(data["metadata"]?["audios"] as JArray)?.ElementAtOrDefault(audio);
+        var selectedSub=(data["metadata"]?["subtitles"] as JArray)?.ElementAtOrDefault(sub);
+        if((selectedAudio!=null && !KnownPlaybackTrack(selectedAudio)) || (sub>=0 && !KnownPlaybackTrack(selectedSub)))return null;
+        return new JObject{["resolution"]=resolution,["audio"]=PlaybackTrack(selectedAudio),["subtitle"]=sub<0?null:PlaybackTrack(selectedSub)};
+    }
+    JObject ReadPlaybackPreference() {
+        var headers=Request.Headers["X-TorBox-Playback"];
+        if(headers.Count!=1 || headers[0].Length>8192)return null;
+        try {
+            var saved=JObject.Parse(Encoding.UTF8.GetString(Convert.FromBase64String(headers[0])));
+            if(saved.Properties().Any(p=>p.Name!="resolution" && p.Name!="audio" && p.Name!="subtitle") ||
+                saved["resolution"]?.Type!=JTokenType.Integer || !new[]{0,360,480,720,1080,1440}.Contains((int)saved["resolution"]))return null;
+            foreach(string field in new[]{"audio","subtitle"}) {
+                if(saved[field]==null || saved[field].Type==JTokenType.Null)continue;
+                if(saved[field] is not JObject track || track.Properties().Any(p=>
+                    !new[]{"language","title","codec","channels","forced","hearing_impaired"}.Contains(p.Name) ||
+                    p.Value is not JValue || p.Value.ToString().Length>160))return null;
+            }
+            return saved;
+        } catch(FormatException) { return null; } catch(Newtonsoft.Json.JsonException) { return null; }
+          catch(OverflowException) { return null; }
+    }
+    static bool MatchPlaybackPreference(JObject saved,JToken data,out int resolution,out int audio,out int sub) {
+        resolution=(int?)saved?["resolution"]??-1;audio=-1;sub=-2;
+        if(saved==null)return false;
+        if((saved["audio"] is JObject && !KnownPlaybackTrack(saved["audio"])) ||
+            (saved["subtitle"] is JObject && !KnownPlaybackTrack(saved["subtitle"])))return false;
+        var audios=data["metadata"]?["audios"] as JArray??new JArray();
+        var subtitles=data["metadata"]?["subtitles"] as JArray??new JArray();
+        audio=MatchSeriesTrack(saved["audio"] as JObject,audios,true);
+        sub=saved["subtitle"] is JObject track?MatchSeriesTrack(track,subtitles,false):-1;
+        int height=(int?)data["metadata"]?["video"]?["height"]??0;
+        if(resolution>0 && height<=resolution)resolution=0;
+        return audio>=0 && (saved["subtitle"] is not JObject || sub>=0);
+    }
+    static string FileDescription(Pick pick,JToken file) {
+        pick.Metadata.TryGetValue((long?)file["id"]??-1,out var known);
+        double duration=DurationSeconds(file["duration"]);
+        if(duration==0)duration=DurationSeconds(known?["metadata"]?["video"]?["duration"]);
+        string text=BytesLabel(PositiveNumber(file["size"]));
+        if(duration>0 && duration<604800)text+=" · "+TimeSpan.FromSeconds(duration).ToString(duration>=3600?@"h\:mm\:ss":@"m\:ss");
+        return text;
+    }
+    static string ChosenHtml(string html,Pick pick,Pick requested,string file=null,string notice=null,JObject preference=null) {
+        var meta=new JObject{["torbox_chosen"]=new JObject{["release"]=pick.Name,["fallback"]=pick!=requested,["file"]=file},
+            ["torbox_preference_notice"]=notice,["torbox_playback"]=preference};
+        string json=meta.ToString(Newtonsoft.Json.Formatting.None);
+        string prefix=json.Substring(0,json.Length-1).Replace("'","\\u0027").Replace("<","\\u003c").Replace(">","\\u003e").Replace("&","\\u0026")+",";
+        bool first=true;
+        string result=Regex.Replace(html,"data-json='\\{",m=>{if(!first)return m.Value;first=false;return "data-json='"+prefix;});
+        if(first)throw new InvalidOperationException("TorBox selection template has no data-json attribute");
+        return result;
+    }
+
+    static bool TitleMatches(string release,string title) {
+        string name=Normalize(title),candidate=Normalize(release);
+        return name.Length>0 && ((" "+candidate+" ").Contains(" "+name+" ",StringComparison.Ordinal) ||
+            (Regex.IsMatch(name,@"[\p{IsCJKUnifiedIdeographs}\p{IsHiragana}\p{IsKatakana}\p{IsHangulSyllables}]") && candidate.Contains(name,StringComparison.Ordinal)));
+    }
+    static IEnumerable<JObject> DeduplicateReleases(IEnumerable<JObject> rows) {
+        foreach(var group in rows.GroupBy(t=>ReleaseHash(t) is string hash ? "hash:"+hash :
+            "link:"+((string)t["MagnetUri"]??(string)t["Link"]??Guid.NewGuid().ToString("N")))) {
+            var row=(JObject)group.OrderByDescending(t=>(int?)t["Seeders"]??0).ThenByDescending(t=>PositiveNumber(t["Size"])>0).First().DeepClone();
+            if(PositiveNumber(row["Size"])==0 && group.FirstOrDefault(t=>PositiveNumber(t["Size"])>0)?["Size"] is JToken size)row["Size"]=size.DeepClone();
+            var voices=group.SelectMany(ReleaseVoices).Where(v=>v!="Не указана").Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            if(voices.Length>0) {
+                if(row["info"] is not JObject)row["info"]=new JObject();
+                row["info"]["voices"]=new JArray(voices);
+            }
+            yield return row;
+        }
+    }
+    async Task<Dictionary<string,bool?>> ReleaseCacheStates(string key,JObject[] rows) {
+        var hashes=rows.Select(ReleaseHash).Where(h=>h!=null).Distinct(StringComparer.Ordinal).ToArray();
+        using var deadline=CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
+        deadline.CancelAfter(TimeSpan.FromSeconds(8));
+        using var gate=new SemaphoreSlim(4,4);
+        var batches=await Task.WhenAll(hashes.Chunk(100).Select(async batch=>{
+            JObject cache=null;bool entered=false;
+            try {
+                await gate.WaitAsync(deadline.Token);entered=true;
+                cache=(await CachedBadgeBatch(key,batch).WaitAsync(deadline.Token)).Cache;
+            } catch(OperationCanceledException) { }
+              catch(Exception ex) { MetadataWarning("search-cache-batch",ex); }
+            finally { if(entered)gate.Release(); }
+            return batch.ToDictionary(h=>h,h=>CacheBadge(cache,h));
+        }));
+        HttpContext.RequestAborted.ThrowIfCancellationRequested();
+        return batches.SelectMany(b=>b).ToDictionary(p=>p.Key,p=>p.Value);
+    }
 
     static string[] ReleaseVoices(JToken row) {
         var values=(row["info"] as JObject)?["voices"] as JArray;
         var names=(values??new JArray()).Where(v=>v.Type==JTokenType.String).Select(v=>((string)v).Trim()).Where(v=>v.Length>0 && v.Length<=160).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         return names.Length>0 ? names : new[]{"Не указана"};
     }
-    static string SimilarReleaseHtml(SimilarTpl tpl,string[] voices,string selected,string search,bool empty=false) {
+    static string SimilarReleaseHtml(SimilarTpl tpl,string[] voices,string selected,string search,bool empty=false,int season=0,int episode=0,int[] seasons=null,JObject options=null,JObject filters=null) {
         var meta=new JObject{["torbox_preview"]=!empty,["torbox_release"]=!empty,["torbox_voice_empty"]=empty,
+            ["torbox_season"]=season,["torbox_episode"]=episode,["torbox_seasons"]=new JArray(seasons??Array.Empty<int>()),
+            ["torbox_filter_options"]=options,["torbox_filter_selected"]=filters,
             ["torbox_voice_options"]=new JArray(voices),["torbox_voice_selected"]=selected,["torbox_voice_search"]=search};
         string json=meta.ToString(Newtonsoft.Json.Formatting.None).Replace("'", "\\u0027").Replace("<", "\\u003c").Replace(">", "\\u003e").Replace("&", "\\u0026");
         string prefix=json.Substring(0,json.Length-1)+",";
@@ -161,7 +322,7 @@ public partial class TorBoxController
         });
     }
 
-    // A menu-scoped read-only batch. Opening the release list never waits for TorBox.
+    // Shared read-only cache batches used by search ranking and menu badges.
     public class CacheCheckInput { public string[] hashes {get;set;} }
     [HttpPost, Route("torbox/cache-check"),RequestSizeLimit(16384)]
     public Task<ActionResult> CacheCheck([FromBody] CacheCheckInput input) => Guard(async(c,key)=>{
@@ -180,7 +341,31 @@ public partial class TorBoxController
     static readonly object badgeBatchGate=new();
     static readonly Dictionary<string,BadgeBatch> badgeBatches=new();
     static readonly Dictionary<string,DateTime> badgeBackoff=new();
+    static readonly Dictionary<string,(DateTime Until,bool Cached)> badgeHashes=new();
     async Task<(JObject Cache,bool Fresh)> CachedBadgeBatch(string key,string[] hashes) {
+        string owner=SeriesKeyHash(key);
+        var known=new JObject();var missing=new List<string>();
+        lock(badgeBatchGate) {
+            foreach(var expired in badgeHashes.Where(x=>x.Value.Until<DateTime.UtcNow).Select(x=>x.Key).ToArray())badgeHashes.Remove(expired);
+            foreach(string hash in hashes.Distinct(StringComparer.Ordinal)) {
+                if(badgeHashes.TryGetValue(owner+":"+hash,out var hit))known[hash]=new JObject{["cached"]=hit.Cached};
+                else missing.Add(hash);
+            }
+        }
+        if(missing.Count==0)return (known,false);
+        var result=await FetchBadgeBatch(key,missing.ToArray());
+        foreach(string hash in missing) {
+            bool? cached=CacheBadge(result.Cache,hash);
+            if(cached.HasValue) {
+                known[hash]=new JObject{["cached"]=cached.Value};
+                lock(badgeBatchGate) {
+                    if(badgeHashes.Count<16384)badgeHashes[owner+":"+hash]=(DateTime.UtcNow.AddMinutes(1),cached.Value);
+                }
+            } else known[hash]=new JObject{["cached"]="unknown"};
+        }
+        return (result.Cache==null && !known.Properties().Any(p=>p.Value["cached"]?.Type==JTokenType.Boolean)?null:known,result.Fresh);
+    }
+    async Task<(JObject Cache,bool Fresh)> FetchBadgeBatch(string key,string[] hashes) {
         string owner=SeriesKeyHash(key),id=owner+":"+string.Join(",",hashes.OrderBy(h=>h,StringComparer.Ordinal));
         BadgeBatch batch;bool fresh=false;
         lock(badgeBatchGate) {
@@ -199,6 +384,7 @@ public partial class TorBoxController
                 cache=await Call("checkcached?hash="+Uri.EscapeDataString(string.Join(",",hashes))+"&format=object",key,cancellationToken:deadline.Token,shared:true) as JObject;
             } catch(TorBoxException) { } catch(HttpRequestException) { } catch(OperationCanceledException) { }
               catch(Newtonsoft.Json.JsonException) { }
+              catch(Exception ex) { MetadataWarning("cache-batch",ex); }
             finally {
                 lock(badgeBatchGate) {
                     batch.Until=DateTime.UtcNow.AddSeconds(cache==null?10:30);
@@ -262,22 +448,38 @@ public partial class TorBoxController
             if(ready!=null && !ready.Value.Selection.Remembered)ready.Value.Selection.Remembered=RememberFilm(ready.Value.Torrent,ready.Value.Selection.Film);
         }
         finally { requested.Gate.Release(); }
-        if(ready==null)return Error(404,"В выбранной и следующих раздачах нет готового видео в кэше TorBox. Загрузки не запускались");
+        if(ready==null)return Error(404,requested.RequestedSeason>0 ? "В готовых раздачах не найдена выбранная серия с распознанным номером. Загрузки не запускались" : "В выбранной и следующих раздачах нет готового видео в кэше TorBox. Загрузки не запускались");
         var p=ready.Value.Selection;
         var t=ready.Value.Torrent;
         if(pick!=ready.Value.Ticket){file=-1;audio=-1;sub=-2;resolution=-1;}
         pick=ready.Value.Ticket;
         var files=(t["files"] as JArray??new JArray()).Where(f=>VideoName(FileName(f))).OrderByDescending(f=>(long?)f["size"]??0).ToArray();
         if(files.Length==0)return Error(404,"В раздаче нет видеофайлов");
+        string preferenceNotice=null;
+        ActionResult Menu(SimilarTpl menu,params (int Season,int Episode)[] frames) {
+            var result=(ContentResult)Similar(menu,frames);
+            result.Content=ChosenHtml(result.Content,p,requested,files.FirstOrDefault(f=>(long?)f["id"]==file) is JToken selectedFile?FileName(selectedFile):null,preferenceNotice);
+            return result;
+        }
         if(p.Serial){
             p.Torrent=t.DeepClone();
             var episodes=EpisodeFiles(p,t);
+            if(file<0 && p.RequestedSeason>0) {
+                var target=episodes.FirstOrDefault(e=>e.Numbered && e.Season==p.RequestedSeason && e.Episode==p.RequestedEpisode);
+                if(target==null)return Error(404,"Выбранная серия отсутствует или её номер не распознан");
+                file=target.File;
+            }
             if(file<0){
                 var episodeTpl=new SimilarTpl();
                 foreach(var episode in episodes)episodeTpl.Append(EpisodeTitle(episode),null,null,OnlineUrl("choose?pick="+pick+"&file="+episode.File));
-                return Similar(episodeTpl,episodes.Select(e=>(e.Season,e.Episode)).ToArray());
+                return Menu(episodeTpl,episodes.Select(e=>(e.Season,e.Episode)).ToArray());
             }
             if(!episodes.Any(e=>e.File==file))return Error(400,"Выбранный файл не распознан как серия");
+        }
+        if(!p.Serial && file<0 && files.Length>1) {
+            var fileMenu=new SimilarTpl();
+            foreach(var videoFile in files)fileMenu.Append(FileName(videoFile),null,FileDescription(p,videoFile),OnlineUrl("choose?pick="+pick+"&file="+videoFile["id"]));
+            return Menu(fileMenu,(0,0));
         }
         if(file<0)file=(long?)files[0]["id"]??-1;
         var frame=p.Serial?EpisodeFiles(p,t).FirstOrDefault(e=>e.File==file):null;
@@ -292,11 +494,17 @@ public partial class TorBoxController
         var video=data["metadata"]?["video"];
         int width=(int?)video?["width"]??0,height=(int?)video?["height"]??0;
         var resolutions=new[]{1440,1080,720,480,360}.Where(x=>x<height).ToArray();
+        var saved=ReadPlaybackPreference();
+        bool matched=MatchPlaybackPreference(saved,data,out int savedResolution,out int savedAudio,out int savedSub);
         if(resolution==-1){
+            if(matched)tpl.Append("Сохранённые параметры",null,
+                (savedResolution==0?"Исходное разрешение":savedResolution+"p")+" · "+(savedAudio<audios.Count?TrackLabel(audios[savedAudio]):"Звук по умолчанию")+" · "+(savedSub<0?"Без субтитров":TrackLabel(subtitles[savedSub])),
+                OnlineUrl(route+"&resolution="+savedResolution+"&audio="+savedAudio+"&sub="+savedSub));
+            else if(saved!=null)preferenceNotice="Сохранённые параметры недоступны или неоднозначны. Выберите качество и дорожки вручную.";
             tpl.Append("Разрешение: исходное",null,width+" × "+height,OnlineUrl(route+"&resolution=0"));
             foreach(int res in resolutions)tpl.Append("Разрешение: "+res+"p",null,"TorBox",OnlineUrl(route+"&resolution="+res));
-            if(!p.Serial && files.Length>1)foreach(var f in files.Where(f=>(long?)f["id"]!=file))tpl.Append("Другой файл: "+FileName(f),null,null,OnlineUrl("choose?pick="+pick+"&file="+f["id"]));
-            return Similar(tpl,(frame?.Season??0,frame?.Episode??0));
+            if(!p.Serial && files.Length>1)foreach(var f in files.Where(f=>(long?)f["id"]!=file))tpl.Append("Другой файл: "+FileName(f),null,FileDescription(p,f),OnlineUrl("choose?pick="+pick+"&file="+f["id"]));
+            return Menu(tpl,(frame?.Season??0,frame?.Episode??0));
         }
         if(resolution!=0 && !resolutions.Contains(resolution))return Error(400,"Разрешение недоступно для этого файла");
         route+="&resolution="+resolution;
@@ -304,20 +512,20 @@ public partial class TorBoxController
             var choices=audios.Select((a,i)=>new{Track=a,Index=i}).OrderByDescending(x=>((string)x.Track["language"]??"").StartsWith("ru")).ThenByDescending(x=>(bool?)x.Track["default"]==true);
             foreach(var x in choices)tpl.Append("Аудио: "+TrackLabel(x.Track),null,(string)x.Track["codec"]+" · каналов: "+(string)x.Track["channels"],OnlineUrl(route+"&audio="+x.Index));
             if(audios.Count==0)tpl.Append("Аудио: по умолчанию",null,null,OnlineUrl(route+"&audio=0"));
-            return Similar(tpl,(frame?.Season??0,frame?.Episode??0));
+            return Menu(tpl,(frame?.Season??0,frame?.Episode??0));
         }
         if(audio<0 || audio>=Math.Max(1,audios.Count))return Error(400,"Звуковая дорожка отсутствует");
         route+="&audio="+audio;
         if(sub==-2){
             tpl.Append("Без субтитров",null,null,OnlineUrl(route+"&sub=-1"));
             for(int i=0;i<subtitles.Count;i++)tpl.Append("Субтитры: "+TrackLabel(subtitles[i]),null,(string)subtitles[i]["codec"],OnlineUrl(route+"&sub="+i));
-            return Similar(tpl,(frame?.Season??0,frame?.Episode??0));
+            return Menu(tpl,(frame?.Season??0,frame?.Episode??0));
         }
         if(sub < -1 || sub>=subtitles.Count)return Error(400,"Дорожка субтитров отсутствует");
         var movie=new MovieTpl(p.Movie,p.Movie);
         string selection=(resolution==0?"Исходное разрешение":resolution+"p")+" · "+(audios.Count>audio?TrackLabel(audios[audio]):"Звук по умолчанию")+" · "+(sub<0?"Без субтитров":TrackLabel(subtitles[sub]));
-        movie.Append(string.IsNullOrWhiteSpace(p.Movie)?p.Name:p.Movie,OnlineUrl("play?pick="+pick+"&file="+file+"&resolution="+resolution+"&audio="+audio+"&sub="+sub),method:"call",voice_name:selection,hls_manifest_timeout:60000);
-        return Content(movie.ToHtml(),"text/html; charset=utf-8");
+        movie.Append(string.IsNullOrWhiteSpace(p.Movie)?p.Name:p.Movie,OnlineUrl("play?pick="+pick+"&file="+file+"&resolution="+resolution+"&audio="+audio+"&sub="+sub),method:"call",voice_name:selection+" · Раздача: "+p.Name,hls_manifest_timeout:60000);
+        return Content(ChosenHtml(movie.ToHtml(),p,requested,FileName(files.First(f=>(long?)f["id"]==file)),preference:PlaybackPreference(data,resolution,audio,sub)),"text/html; charset=utf-8");
     });
     static bool CachedReady(JToken t) =>
         (t?["download_present"]?.Type==JTokenType.Boolean ? (bool)t["download_present"] : (bool?)t?["download_finished"]==true) &&
@@ -333,7 +541,7 @@ public partial class TorBoxController
         var chain=new List<(string Ticket,Pick Selection)>();
         for(int i=0;ticket!=null && i<96;i++) {
             var candidate=GetPick(ticket);var first=chain.FirstOrDefault().Selection;
-            if(first==null || !first.Serial || SeasonHint(first.Name)==0 || SeasonHint(candidate.Name)==SeasonHint(first.Name))chain.Add((ticket,candidate));
+            if(first==null || first.RequestedSeason>0 || !first.Serial || SeasonHint(first.Name)==0 || SeasonHint(candidate.Name)==SeasonHint(first.Name))chain.Add((ticket,candidate));
             ticket=candidate.Next;
         }
         var owned=await OwnedTorrents(key);
@@ -352,6 +560,8 @@ public partial class TorBoxController
                 torrent=await AttachCachedOnly(p,config,key);
             }
             if(torrent==null)continue;
+            if(requested.RequestedSeason>0 && !EpisodeFiles(p,torrent).Any(e=>e.Numbered &&
+                e.Season==requested.RequestedSeason && e.Episode==requested.RequestedEpisode))continue;
             BindReady(p,torrent,key);
             requested.ReadyTicket=entry.Ticket;requested.ReadyKeyHash=digest;requested.ReadyTorrent=torrent.DeepClone();requested.ReadyUntil=DateTime.UtcNow.AddSeconds(30);
             return(entry.Ticket,p,requested.ReadyTorrent);

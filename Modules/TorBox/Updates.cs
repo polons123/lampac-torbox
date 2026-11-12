@@ -35,7 +35,7 @@ public partial class TorBoxController
         return SeriesKeyHash(uri.Host.ToLowerInvariant()+uri.PathAndQuery);
     }
     static string ReleaseHash(JToken row) {
-        string link=(string)row["MagnetUri"]??"";
+        string link=Uri.UnescapeDataString((string)row["MagnetUri"]??(string)row["Link"]??"");
         string hash=Regex.Match(link,@"urn:btih:([a-z0-9]+)",RegexOptions.IgnoreCase).Groups[1].Value;
         return NormalizeCacheHash(string.IsNullOrEmpty(hash)?(string)row["InfoHash"]??(string)row["Hash"]:hash);
     }
