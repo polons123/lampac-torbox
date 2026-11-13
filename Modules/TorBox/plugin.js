@@ -328,7 +328,7 @@
           function batch() {
             if (!valid()) { finish(); return; }
             if (cursor >= wanted.length) { finish(); done(); return; }
-            var chunk = wanted.slice(cursor, cursor + 4);
+            var chunk = wanted.slice(cursor, cursor + 8);
             request('infuse/links', { id: torrent.id, files: chunk.map(function (entry) { return entry.id; }) }, function (j) {
               if (!valid()) { finish(); return; }
               var rows = j.data || [];
@@ -558,14 +558,28 @@
     request('series/followed', null, function (j) {
       if (!valid()) return;
       if (!j.items.length) { Lampa.Noty.show('Сезон сохранится после запуска серии через Онлайн → TorBox'); return back(); }
-      choose('Обновления сериалов', j.items.map(function (watch) {
-        return { title: escaped(watch.title) + ' · ' + watch.season + ' сезон',
+      function forget(id) {
+        request('series/forget', { id: id }, function () {
+          if (!valid()) return;
+          Lampa.Noty.show('Сезон убран из списка');
+          openSeasonUpdates(back);
+        }, function () { if (valid()) openSeasonUpdates(back); });
+      }
+      var rows = [];
+      j.items.forEach(function (watch) {
+        rows.push({ title: escaped(watch.title) + ' · ' + watch.season + ' сезон',
           subtitle: 'Последняя открытая: ' + watch.episode + ' серия · ' + escaped(watch.selection), run: function () {
             if (!valid()) return;
             Lampa.Noty.show('Проверяю исходную раздачу в JacRed…');
             request('series/updates?id=' + encodeURIComponent(watch.id), null, function (result) {
               if (!valid()) return;
-              if (!result.offer) { Lampa.Noty.show(result.detail); return openSeasonUpdates(back); }
+              if (!result.offer) {
+                choose(result.detail || 'Проверка сезона не удалась', [
+                  { title: 'Убрать из списка обновлений', run: function () { forget(watch.id); } },
+                  { title: 'Назад к сезонам', run: function () { openSeasonUpdates(back); } }
+                ], function () { openSeasonUpdates(back); });
+                return;
+              }
               var summary = result.status === 'updated' ? 'Найдена новая версия раздачи' : 'Хеш раздачи не изменился';
               summary += result.cached === true ? ' · есть в кэше TorBox' : result.cached === false ? ' · нет готового кэша' : ' · кэш не подтверждён';
               if (result.episodes_verified) summary += result.new_episodes.length ? ' · новые серии: ' + result.new_episodes.join(', ') : ' · новых серий нет';
@@ -582,35 +596,58 @@
                   window.lampac_torbox_series_play(response, {}, movie);
                 }, function () { preparing = false; if (valid()) back(); });
               }
-              var actions = [{ title: 'Назад к сезонам', run: function () { openSeasonUpdates(back); } }];
+              var actions = [
+                { title: 'Убрать из списка обновлений', run: function () { forget(watch.id); } },
+                { title: 'Назад к сезонам', run: function () { openSeasonUpdates(back); } }
+              ];
               if (result.cached === true) {
                 actions.unshift({ title: 'Открыть ' + result.last_episode + ' серию с сохранёнными параметрами', subtitle: escaped(result.release), run: function () { play(false); } });
-                actions.unshift({ title: 'Открыть следующую серию (' + (result.last_episode + 1) + ')', subtitle: 'Тот же сезон, озвучка, субтитры и качество', run: function () { play(true); } });
+                if (result.next_available === true)
+                  actions.unshift({ title: 'Открыть следующую серию (' + (result.last_episode + 1) + ')', subtitle: 'Тот же сезон, озвучка, субтитры и качество', run: function () { play(true); } });
               }
               choose(summary, actions, function () { openSeasonUpdates(back); });
-            }, function () { if (valid()) back(); });
-          } };
-      }), back);
+            }, function () {
+              if (!valid()) return;
+              choose('Проверка сезона не удалась', [
+                { title: 'Убрать из списка обновлений', run: function () { forget(watch.id); } },
+                { title: 'Назад к сезонам', run: function () { openSeasonUpdates(back); } }
+              ], function () { openSeasonUpdates(back); });
+            });
+          } });
+        rows.push({ title: 'Убрать из списка обновлений', subtitle: escaped(watch.title) + ' · ' + watch.season + ' сезон', run: function () { forget(watch.id); } });
+      });
+      choose('Обновления сериалов', rows, back);
     }, function () { if (valid()) back(); });
   }
   function Library(object) {
     Lampa.InteractionCategory.call(this, object);
     var self = this;
     var alive = true;
+    var activeOnly = object.active === true;
+    var listEpoch = 0;
     var more = false;
     var loading = false;
     var deleting = false;
     var changingAirlock = false;
     var airlockUsage = null;
     var libraryIdentity = keyIdentity();
-    var airlockSummary = $('<div class="torbox-airlock-summary" role="status">').text('Airlocked Data: получаю сведения…').css({ padding: '0 0 1em', opacity: '.8' });
+    var airlockSummary = $('<div class="torbox-airlock-summary" role="status">').text('Airlocked Data: получаю сведения…').css({ padding: '0 0 1em', opacity: '.8', textAlign: 'center', width: '100%' });
     var g;
     var view = { scope: null, refresh: reload, visible: function () {
       var active = Lampa.Activity.active();
       return alive && active && active.component === 'my_torbox' && !Lampa.Player.opened();
     } };
     var destroy = this.destroy;
-    function reload() { Lampa.Activity.replace({ component: 'my_torbox', title: 'Мой TorBox', page: 1 }); }
+    function libraryActivity(active) {
+      return { component: 'my_torbox', title: active ? 'Активные загрузки' : 'Мой TorBox', page: 1, active: active === true };
+    }
+    function reload() { Lampa.Activity.replace(libraryActivity(activeOnly)); }
+    function setFilter(nextActive) {
+      if (nextActive === activeOnly) return;
+      alive = false;
+      listEpoch++;
+      Lampa.Activity.replace(libraryActivity(nextActive));
+    }
     function airlockGB(bytes) { return (bytes / 1073741824).toFixed(2) + ' GB'; }
     function showAirlockUsage(j) {
       airlockUsage = j;
@@ -628,8 +665,10 @@
     }
     function attachAirlockUsage() { self.render().find('.scroll__content').first().prepend(airlockSummary); }
     function page(number, done, failed) {
-      request('list?offset=' + ((number - 1) * 100), null, function (j) {
-        if (!alive) return;
+      var epoch = listEpoch;
+      var query = 'list?offset=' + ((number - 1) * 100) + (activeOnly ? '&active=true' : '');
+      request(query, null, function (j) {
+        if (!alive || epoch !== listEpoch) { if (failed) failed(); return; }
         view.scope = j.deletion_scope;
         if (airlockUsage) showAirlockUsage(airlockUsage);
         more = !!j.more;
@@ -642,7 +681,7 @@
           return { id: 'torbox-' + t.id, title: film.title || t.name, original_title: film.original_title || t.name, release_date: film.year ? film.year + '-01-01' : '', torboxItem: t };
         }), total_pages: number + (j.more ? 1 : 0) });
         setTimeout(function () { if (alive) resumeDeletions(view.scope); }, 0);
-      }, function () { if (alive && failed) failed(); });
+      }, function () { if (alive && epoch === listEpoch && failed) failed(); });
     }
     this.create = function () {
       g = begin('content');
@@ -651,10 +690,12 @@
       self.activity.loader(true);
       loadAirlockUsage();
       page(1, function (data) {
-        if (!data.results.length) data.results.push({ id: 'torbox-empty', title: 'В TorBox пока нет загрузок', torboxAction: reload });
+        if (!alive) return;
+        if (!data.results.length) data.results.push({ id: activeOnly ? 'torbox-active-empty' : 'torbox-empty', title: activeOnly ? 'Нет активных загрузок' : 'В TorBox пока нет загрузок', torboxAction: reload });
         self.build(data);
         attachAirlockUsage();
       }, function () {
+        if (!alive) return;
         self.build({ results: [{ id: 'torbox-retry', title: 'Повторить загрузку', torboxAction: reload }], total_pages: 1 });
         attachAirlockUsage();
       });
@@ -664,6 +705,7 @@
       if (!alive || !more || loading) return;
       loading = true;
       page(object.page + 1, function (data) {
+        if (!alive) { loading = false; return; }
         object.page++;
         self.append(data, true);
         loading = false;
@@ -711,7 +753,8 @@
       card.onMenu = function () {
         originController = 'content';
         var back = function () { Lampa.Controller.toggle('content'); };
-        var actions = [{ title: 'Обновить список', run: reload },
+        var actions = [{ title: activeOnly ? 'Показать всю библиотеку' : 'Активные загрузки', run: function () { setFilter(!activeOnly); } },
+          { title: 'Обновить список', run: reload },
           { title: 'Обновления сериалов', subtitle: 'Новые версии сезонных раздач и сохранённый выбор', run: function () { openSeasonUpdates(back); } }];
         var desiredAirlock = t ? !t.airlocked : false;
         if (t) {
@@ -769,6 +812,7 @@
     };
     this.destroy = function () {
       alive = false;
+      listEpoch++;
       if (deletionView === view) deletionView = null;
       if (g === generation) generation++;
       destroy.call(self);
@@ -820,7 +864,7 @@
       if (message) Lampa.Noty.show(message);
     }
     function cell(row) {
-      var title = (info.title || '') + ' · ' + row.season + ' сезон · ' + row.episode + ' серия';
+      var title = (info.title ? info.title + ' · ' : '') + (row.title || (row.season + ' сезон · ' + row.episode + ' серия'));
       var identity = movie.original_name || movie.original_title || movie.id || info.title;
       return { title: title, season: row.season, episode: row.episode, voice_name: info.selection + (info.release ? ' · Раздача: ' + info.release : ''),
         torbox_session: run.session, isonline: true, quality: {}, hls_manifest_timeout: 60000,
@@ -857,8 +901,44 @@
         if (row.index === info.selected_index) entry.url = j.url;
       });
       run.playlist.length = info.items.length;
+      run.choice = info.choice || null;
       return true;
     }
+    run.offerChoice = function () {
+      var choice = run.choice;
+      if (run.busy || run.choosing || !choice || !choice.files || !choice.files.length || Lampa.Select.opened()) return;
+      run.choosing = true;
+      var controller = Lampa.Controller.enabled().name;
+      function back() {
+        run.choosing = false;
+        Lampa.Select.hide();
+        Lampa.Controller.toggle(Lampa.Player.opened() ? 'player' : controller);
+      }
+      choose('Выберите файл · ' + (choice.title || (choice.episode + ' серия')), choice.files.map(function (file) {
+        return {
+          title: file.name || file.title,
+          subtitle: choice.title,
+          run: function () {
+            run.choosing = false;
+            if (run.busy || activeSeries !== run) return;
+            run.busy = true;
+            request('series/resume?session=' + encodeURIComponent(run.session) + '&file=' + encodeURIComponent(file.file), null, function (j) {
+              run.busy = false;
+              if (activeSeries !== run) return;
+              if (!j.torbox_series || !j.torbox_series.items || !j.torbox_series.items.length) {
+                Lampa.Noty.show('TorBox не вернул продолжение сериала');
+                return run.offerChoice();
+              }
+              var playing = Lampa.Player.playdata() || {};
+              window.lampac_torbox_series_play(j, { headers: playing.headers, subtitles: playing.subtitles }, movie);
+            }, function () {
+              run.busy = false;
+              if (activeSeries === run) run.offerChoice();
+            });
+          }
+        };
+      }), back);
+    };
     sync(response);
     var selected = run.playlist[info.selected_index];
     $.extend(selected, { headers: first.headers, subtitles: first.subtitles });
@@ -880,6 +960,8 @@
           });
           var launch = $.extend({}, playlist[j.selected_index], { playlist: playlist });
           activeSeries = null;
+          if (info.choice && info.choice.files && info.choice.files.length)
+            Lampa.Noty.show('Плейлист остановлен перед серией с несколькими файлами. Выберите файл во внутреннем плеере');
           Lampa.Player.play(launch);
           Lampa.Player.playlist(playlist);
         }, function () { externalPreparation = false; if (activeSeries === run) activeSeries = null; });
@@ -894,8 +976,27 @@
   };
   // Auto-advance is enabled for this TorBox session without changing global settings.
   function startSeriesControls() {
+  function ownSeries() {
+    var run = activeSeries;
+    if (!run || run.busy || !Lampa.Player.opened() || Lampa.Select.opened()) return;
+    var data = Lampa.Player.playdata() || {};
+    if (data.torbox_session !== run.session) return;
+    return run;
+  }
   Lampa.PlayerVideo.listener.follow('ended', function () {
-    if (activeSeries && Lampa.Player.opened() && !Lampa.Storage.field('playlist_next') && !Lampa.Select.opened()) Lampa.PlayerPlaylist.next();
+    var run = ownSeries();
+    if (!run) return;
+    if (Lampa.PlayerPlaylist.canNext()) {
+      if (!Lampa.Storage.field('playlist_next')) Lampa.PlayerPlaylist.next();
+      return;
+    }
+    if (run.offerChoice) run.offerChoice();
+  });
+  // The player already moves to the next item. Here the button only opens a file choice when the playlist has stopped.
+  Lampa.PlayerPanel.listener.follow('to_end', function () {
+    var run = ownSeries();
+    if (!run || Lampa.PlayerPlaylist.canNext()) return;
+    if (run.offerChoice) run.offerChoice();
   });
   Lampa.Player.listener.follow('destroy', function () {
     var run = activeSeries;
@@ -1125,6 +1226,36 @@
     };
   }
 
+  var arrangingMenu = false;
+  function arrangeLibraryMenu() {
+    if (arrangingMenu) return;
+    var list = $('.menu .menu__list').eq(0);
+    var series = list.children('[data-action="tv"]').first();
+    var labels = ['Русское', 'РУ + КЗ: жанры', 'Мой TorBox'];
+    var entries = labels.map(function (label) {
+      return list.children('.menu__item').filter(function () { return $(this).find('.menu__text').text().trim() === label; }).first();
+    });
+    if (!series.length || entries.some(function (entry) { return !entry.length; })) return;
+    var seriesLabel = series.find('.menu__text').text().trim();
+    var order = Lampa.Storage.get('menu_sort', []);
+    if (!Array.isArray(order)) order = [];
+    // Once the three labels are stored, a manual reorder stays. Insert only while one is missing.
+    if (order.indexOf(seriesLabel) >= 0 && labels.every(function (label) { return order.indexOf(label) >= 0; })) return;
+    if (order.indexOf(seriesLabel) < 0)
+      order = list.children('.menu__item').map(function () { return $(this).find('.menu__text').text().trim(); }).get();
+    var next = order.filter(function (label) { return labels.indexOf(label) < 0; });
+    var at = next.indexOf(seriesLabel);
+    if (at < 0) return;
+    next.splice.apply(next, [at + 1, 0].concat(labels));
+    arrangingMenu = true;
+    try {
+      if (JSON.stringify(order) !== JSON.stringify(next)) Lampa.Storage.set('menu_sort', next);
+      entries.forEach(function (entry) {
+        if (series.next()[0] !== entry[0]) entry.insertAfter(series);
+        series = entry;
+      });
+    } finally { arrangingMenu = false; }
+  }
   var started = false;
   function start() {
     if (started) return;
@@ -1143,6 +1274,9 @@
     var entry = $('<li class="menu__item selector" data-action="my_torbox"><div class="menu__ico"><svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M19 10h-.3A7 7 0 0 0 5.2 8.2 5 5 0 0 0 6 18h13a4 4 0 0 0 0-8M10 15V9l5 3z"/></svg></div><div class="menu__text">Мой TorBox</div></li>');
     entry.on('hover:enter', openLibrary);
     $('.menu .menu__list').eq(0).append(entry);
+    arrangeLibraryMenu();
+    if (typeof MutationObserver !== 'undefined')
+      new MutationObserver(arrangeLibraryMenu).observe($('.menu .menu__list').eq(0)[0], { childList: true });
   }
   if (window.appready) start();
   else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') start(); });

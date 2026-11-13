@@ -41,6 +41,18 @@ public partial class TorBoxController
     static readonly ConcurrentDictionary<string,Pick> picks = new();
     static readonly object pickCacheGate = new();
     static readonly ConcurrentDictionary<string,(DateTime Expires,JArray Rows)> searchCache = new();
+    static readonly object searchCacheGate=new();
+    static void StoreSearch(string searchKey,JArray rows) {
+        var now=DateTime.UtcNow;
+        lock(searchCacheGate) {
+            foreach(var expired in searchCache.Where(x=>x.Value.Expires<=now).Select(x=>x.Key).ToArray())searchCache.TryRemove(expired,out _);
+            while(searchCache.Count>=256 && !searchCache.ContainsKey(searchKey)) {
+                string oldest=searchCache.OrderBy(x=>x.Value.Expires).Select(x=>x.Key).FirstOrDefault();
+                if(oldest==null || !searchCache.TryRemove(oldest,out _))break;
+            }
+            searchCache[searchKey]=(now.AddMinutes(5),rows);
+        }
+    }
 
     ActionResult Similar(SimilarTpl t, params (int Season,int Episode)[] frames) {
         string html=t.ToHtml();
@@ -62,19 +74,64 @@ public partial class TorBoxController
         return p;
         }
     }
-    static int Resolution(JToken t) {
-        string s = ((string)t["Title"] ?? "").ToLowerInvariant();
-        if(Regex.IsMatch(s,"2160|\\b4k\\b|\\buhd\\b"))return 2160;
-        if(s.Contains("1440"))return 1440;
-        if(s.Contains("1080"))return 1080;
-        if(s.Contains("720"))return 720;
-        if(s.Contains("576"))return 576;
-        if(s.Contains("480"))return 480;
-        return 360;
+    static readonly Regex releaseResolution=new(@"(?<!\d)(2160|1440|1080|720|576|480|360)(?:p|\b)",RegexOptions.IgnoreCase|RegexOptions.CultureInvariant);
+    static readonly Regex releaseUhd=new(@"\b(?:4k|uhd(?:rip)?)\b",RegexOptions.IgnoreCase|RegexOptions.CultureInvariant);
+    static readonly Regex releaseDv=new(@"\b(?:DV|DoVi|Dolby[ ._-]*Vision)\b",RegexOptions.IgnoreCase|RegexOptions.CultureInvariant);
+    static readonly Regex releaseHdr10Plus=new(@"\bHDR10(?:\+|Plus\b)",RegexOptions.IgnoreCase|RegexOptions.CultureInvariant);
+    static readonly Regex releaseHdr10=new(@"\bHDR10\b",RegexOptions.IgnoreCase|RegexOptions.CultureInvariant);
+    // A trailing word boundary keeps HDRip out of HDR. HDR10 is matched by its own pattern.
+    static readonly Regex releaseHdr=new(@"\bHDR\b",RegexOptions.IgnoreCase|RegexOptions.CultureInvariant);
+    static readonly Regex releaseSdr=new(@"\bSDR\b",RegexOptions.IgnoreCase|RegexOptions.CultureInvariant);
+    static readonly Regex releaseHevc=new(@"\b(?:HEVC|[xh][ ._-]?265)\b",RegexOptions.IgnoreCase|RegexOptions.CultureInvariant);
+    static readonly Regex releaseAvc=new(@"\b(?:AVC|[xh][ ._-]?264)\b",RegexOptions.IgnoreCase|RegexOptions.CultureInvariant);
+    static readonly Regex releaseAv1=new(@"\bAV1\b",RegexOptions.IgnoreCase|RegexOptions.CultureInvariant);
+    static readonly string[] resolutionLabels={"2160p","1440p","1080p","720p","576p","480p","360p","Не указано"};
+    static readonly string[] hdrLabels={"Dolby Vision + HDR","Dolby Vision","HDR10+","HDR10","HDR","SDR","Не указано"};
+    static readonly string[] codecLabels={"AV1","HEVC","AVC","Не указано"};
+    static readonly string[] sizeLabels={"До 4 ГиБ","4–10 ГиБ","10–25 ГиБ","25–50 ГиБ","От 50 ГиБ","Не указан"};
+    class ReleaseTags { public int Resolution; public string Res,Hdr,Codec; }
+    static int TraitRank(string field,string value) {
+        string[] order=field switch{"res"=>resolutionLabels,"hdr"=>hdrLabels,"codec"=>codecLabels,"size"=>sizeLabels,_=>Array.Empty<string>()};
+        int index=Array.IndexOf(order,value);
+        return index<0?order.Length:index;
     }
+    static ReleaseTags ParseReleaseTags(string title) {
+        title??="";
+        int resolution=0;
+        foreach(Match match in releaseResolution.Matches(title))resolution=Math.Max(resolution,int.Parse(match.Groups[1].Value));
+        if(resolution==0 && releaseUhd.IsMatch(title))resolution=2160;
+        bool dv=releaseDv.IsMatch(title),hdr10plus=releaseHdr10Plus.IsMatch(title),hdr10=releaseHdr10.IsMatch(title),hdr=releaseHdr.IsMatch(title);
+        return new ReleaseTags{Resolution=resolution,Res=resolution>0?resolution+"p":"Не указано",
+            Hdr=dv&&(hdr10plus||hdr10||hdr)?"Dolby Vision + HDR":dv?"Dolby Vision":hdr10plus?"HDR10+":hdr10?"HDR10":hdr?"HDR":releaseSdr.IsMatch(title)?"SDR":"Не указано",
+            Codec=releaseHevc.IsMatch(title)?"HEVC":releaseAvc.IsMatch(title)?"AVC":releaseAv1.IsMatch(title)?"AV1":"Не указано"};
+    }
+    static ReleaseTags StoredTags(JToken row) {
+        if(row["tb_resolution"]?.Type==JTokenType.Integer && row["tb_res"]?.Type==JTokenType.String && row["tb_hdr"]?.Type==JTokenType.String && row["tb_codec"]?.Type==JTokenType.String)
+            return new ReleaseTags{Resolution=(int)row["tb_resolution"],Res=(string)row["tb_res"],Hdr=(string)row["tb_hdr"],Codec=(string)row["tb_codec"]};
+        return ParseReleaseTags((string)row["Title"]);
+    }
+    static void StoreTags(JObject row,ReleaseTags tags) {
+        row["tb_resolution"]=tags.Resolution;row["tb_res"]=tags.Res;row["tb_hdr"]=tags.Hdr;row["tb_codec"]=tags.Codec;
+    }
+    static ReleaseTags MergeTags(IEnumerable<(ReleaseTags Tags,int Seeds)> items) {
+        var rows=items.ToArray();
+        int resolution=rows.Max(x=>x.Tags.Resolution);
+        string hdr=rows.Select(x=>x.Tags.Hdr).OrderBy(v=>TraitRank("hdr",v)).First();
+        string codec=rows.Any(x=>x.Tags.Codec!="Не указано")?rows.Where(x=>x.Tags.Codec!="Не указано").OrderByDescending(x=>x.Seeds).First().Tags.Codec:"Не указано";
+        return new ReleaseTags{Resolution=resolution,Res=resolution>0?resolution+"p":"Не указано",Hdr=hdr,Codec=codec};
+    }
+    // Unknown quality is 0 so it sorts below every labelled resolution.
+    static int Resolution(JToken t) => StoredTags(t).Resolution;
     static string Normalize(string s) => Regex.Replace((s??"").Normalize(NormalizationForm.FormKC).ToLowerInvariant().Replace('ё','е'),"[^\\p{L}\\p{N}]+", " ").Trim();
     static bool VideoName(string name) => Regex.IsMatch(name??"",@"\.(mkv|mp4|avi|m4v|mov|ts|m2ts|webm|mpg|mpeg|wmv)$",RegexOptions.IgnoreCase) && !Regex.IsMatch(name??"",@"\b(sample|trailer|трейлер)\b",RegexOptions.IgnoreCase);
     static string FileName(JToken f) => (string)f["short_name"] ?? (string)f["name"] ?? "Видео";
+    // Films keep a title only when it names this year. Series keep a later season year and drop an older namesake.
+    static bool ReleaseYearAllowed(string title,int year,bool serial) {
+        if(year<=0)return true;
+        var years=Regex.Matches(title??"",@"\b(?:19|20)\d{2}\b").Select(m=>int.Parse(m.Value)).ToArray();
+        if(years.Length==0)return true;
+        return serial?years.Any(y=>y>=year-1):years.Contains(year);
+    }
 
     [HttpGet, Route("lite/torbox")]
     public Task<ActionResult> Online(string title, string original_title, int year=0, byte serial=0, bool rjson=true, long id=0, long tmdb_id=0, string source=null, string tb_voice=null, int tb_season=0, int tb_episode=0, string tb_res=null, string tb_hdr=null, string tb_codec=null, string tb_size=null) => Guard(async(c,key)=>{
@@ -87,18 +144,17 @@ public partial class TorBoxController
         else {
             var parser=c["jacred"] as JObject;
             if(parser==null || !Uri.TryCreate((string)parser["base_url"],UriKind.Absolute,out var baseUri))return Error(503,"JacRed для TorBox не настроен");
-            string url=baseUri.ToString().TrimEnd('/')+"/api/v2.0/indexers/all/results?title="+Uri.EscapeDataString(title??original_title)+"&title_original="+Uri.EscapeDataString(original_title??title)+"&year="+(serial==1?0:year)+"&is_serial="+(serial==1?2:1)+"&apikey="+Uri.EscapeDataString((string)parser["api_key"]??"");
+            string url=baseUri.ToString().TrimEnd('/')+"/api/v2.0/indexers/all/results?title="+Uri.EscapeDataString(title??original_title)+"&title_original="+Uri.EscapeDataString(original_title??title)+"&year="+year+"&is_serial="+(serial==1?2:1)+"&apikey="+Uri.EscapeDataString((string)parser["api_key"]??"");
             using var response=await ParserClient.GetAsync(url,HttpContext.RequestAborted);
             if(!response.IsSuccessStatusCode)return Error(502,"JacRed не ответил на поиск");
             var parsed=JObject.Parse(await response.Content.ReadAsStringAsync());
             rows=parsed["Results"] as JArray ?? new JArray();
-            if(searchCache.Count>256)searchCache.Clear();
-            searchCache[searchKey]=(DateTime.UtcNow.AddMinutes(5),rows);
+            StoreSearch(searchKey,rows);
         }
         var eligible=rows.OfType<JObject>().Where(t=>!string.IsNullOrWhiteSpace((string)t["Title"]) &&
             (TitleMatches((string)t["Title"],title) || TitleMatches((string)t["Title"],original_title)) &&
             !Regex.IsMatch((string)t["Title"],@"\b(CAMRip|HDCAM|HDTS|TSRip|TELESYNC)\b",RegexOptions.IgnoreCase) &&
-            (serial==1 || year<=0 || !Regex.IsMatch((string)t["Title"],@"\b(19|20)\d{2}\b") || Regex.IsMatch((string)t["Title"],@"\b"+year+@"\b")))
+            ReleaseYearAllowed((string)t["Title"],year,serial==1))
             .OrderByDescending(Resolution).ThenByDescending(t=>(int?)t["Seeders"]??0);
         var releases=DeduplicateReleases(eligible).ToArray();
         if(releases.Length==0)return Error(404,"JacRed не нашёл подходящих раздач фильма");
@@ -106,7 +162,7 @@ public partial class TorBoxController
         var filters=new JObject{["res"]=tb_res??"",["hdr"]=tb_hdr??"",["codec"]=tb_codec??"",["size"]=tb_size??""};
         if(filters.Properties().Any(f=>((string)f.Value).Length>32))return Error(400,"Некорректный фильтр TorBox");
         var options=new JObject();
-        foreach(var field in filters.Properties())options[field.Name]=new JArray(releases.Select(t=>ReleaseTrait(t,field.Name)).Distinct().OrderBy(v=>v,StringComparer.Ordinal));
+        foreach(var field in filters.Properties())options[field.Name]=new JArray(releases.Select(t=>ReleaseTrait(t,field.Name)).Distinct().OrderBy(v=>TraitRank(field.Name,v)));
         string selected=(tb_voice??"").Trim();
         if(selected.Length>160)return Error(400,"Слишком длинное название озвучки");
         selected=voices.FirstOrDefault(v=>string.Equals(v,selected,StringComparison.OrdinalIgnoreCase))??selected;
@@ -177,20 +233,9 @@ public partial class TorBoxController
     static double DurationSeconds(JToken value) => PositiveNumber(value)>0 ? PositiveNumber(value) :
         TimeSpan.TryParse(value?.ToString(),System.Globalization.CultureInfo.InvariantCulture,out var duration) && duration.TotalSeconds>0 ? duration.TotalSeconds : 0;
     static string ReleaseTrait(JToken row,string field) {
-        string title=(string)row["Title"]??"";
-        if(field=="res") {
-            var match=Regex.Match(title,@"(?<!\d)(2160|1440|1080|720|576|480|360)(?:p|\b)",RegexOptions.IgnoreCase);
-            return match.Success ? match.Groups[1].Value+"p" : Regex.IsMatch(title,@"\b(4k|uhd)\b",RegexOptions.IgnoreCase)?"2160p":"Не указано";
-        }
-        if(field=="codec")return Regex.IsMatch(title,@"\b(HEVC|[xh][ ._-]?265)\b",RegexOptions.IgnoreCase)?"HEVC":
-            Regex.IsMatch(title,@"\b(AVC|[xh][ ._-]?264)\b",RegexOptions.IgnoreCase)?"AVC":
-            Regex.IsMatch(title,@"\bAV1\b",RegexOptions.IgnoreCase)?"AV1":"Не указано";
-        if(field=="hdr") {
-            bool dv=Regex.IsMatch(title,@"\b(DV|DoVi|Dolby[ ._-]*Vision)\b",RegexOptions.IgnoreCase),hdr=Regex.IsMatch(title,@"\bHDR",RegexOptions.IgnoreCase);
-            return dv ? hdr?"Dolby Vision + HDR":"Dolby Vision" :
-                Regex.IsMatch(title,@"\bHDR10(?:\+|Plus)",RegexOptions.IgnoreCase)?"HDR10+":
-                Regex.IsMatch(title,@"\bHDR10\b",RegexOptions.IgnoreCase)?"HDR10":hdr?"HDR":
-                Regex.IsMatch(title,@"\bSDR\b",RegexOptions.IgnoreCase)?"SDR":"Не указано";
+        if(field=="res" || field=="hdr" || field=="codec") {
+            var tags=StoredTags(row);
+            return field=="res"?tags.Res:field=="hdr"?tags.Hdr:tags.Codec;
         }
         double size=PositiveNumber(row["Size"])/1073741824;
         return size<=0?"Не указан":size<4?"До 4 ГиБ":size<10?"4–10 ГиБ":size<25?"10–25 ГиБ":size<50?"25–50 ГиБ":"От 50 ГиБ";
@@ -271,13 +316,16 @@ public partial class TorBoxController
     static IEnumerable<JObject> DeduplicateReleases(IEnumerable<JObject> rows) {
         foreach(var group in rows.GroupBy(t=>ReleaseHash(t) is string hash ? "hash:"+hash :
             "link:"+((string)t["MagnetUri"]??(string)t["Link"]??Guid.NewGuid().ToString("N")))) {
-            var row=(JObject)group.OrderByDescending(t=>(int?)t["Seeders"]??0).ThenByDescending(t=>PositiveNumber(t["Size"])>0).First().DeepClone();
+            var ranked=group.Select(t=>(Row:t,Tags:ParseReleaseTags((string)t["Title"]),Seeds:(int?)t["Seeders"]??0)).ToArray();
+            var row=(JObject)ranked.OrderByDescending(x=>x.Seeds).ThenByDescending(x=>PositiveNumber(x.Row["Size"])>0).First().Row.DeepClone();
             if(PositiveNumber(row["Size"])==0 && group.FirstOrDefault(t=>PositiveNumber(t["Size"])>0)?["Size"] is JToken size)row["Size"]=size.DeepClone();
             var voices=group.SelectMany(ReleaseVoices).Where(v=>v!="Не указана").Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             if(voices.Length>0) {
                 if(row["info"] is not JObject)row["info"]=new JObject();
                 row["info"]["voices"]=new JArray(voices);
             }
+            // One indexer title may omit the resolution that another copy of the same hash states.
+            StoreTags(row,MergeTags(ranked.Select(x=>(x.Tags,x.Seeds))));
             yield return row;
         }
     }
@@ -359,7 +407,8 @@ public partial class TorBoxController
             if(cached.HasValue) {
                 known[hash]=new JObject{["cached"]=cached.Value};
                 lock(badgeBatchGate) {
-                    if(badgeHashes.Count<16384)badgeHashes[owner+":"+hash]=(DateTime.UtcNow.AddMinutes(1),cached.Value);
+                    // A miss goes stale quickly so a new cache hit can show. A hit stays for a minute.
+                    if(badgeHashes.Count<16384)badgeHashes[owner+":"+hash]=(DateTime.UtcNow.AddSeconds(cached.Value?60:10),cached.Value);
                 }
             } else known[hash]=new JObject{["cached"]="unknown"};
         }
@@ -497,6 +546,7 @@ public partial class TorBoxController
         var saved=ReadPlaybackPreference();
         bool matched=MatchPlaybackPreference(saved,data,out int savedResolution,out int savedAudio,out int savedSub);
         if(resolution==-1){
+            if(matched && (int?)saved["resolution"]>0 && height<=0)preferenceNotice=UnknownHeightNotice;
             if(matched)tpl.Append("Сохранённые параметры",null,
                 (savedResolution==0?"Исходное разрешение":savedResolution+"p")+" · "+(savedAudio<audios.Count?TrackLabel(audios[savedAudio]):"Звук по умолчанию")+" · "+(savedSub<0?"Без субтитров":TrackLabel(subtitles[savedSub])),
                 OnlineUrl(route+"&resolution="+savedResolution+"&audio="+savedAudio+"&sub="+savedSub));

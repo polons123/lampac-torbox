@@ -157,15 +157,37 @@ public partial class TorBoxController : BaseController
             throw new TorBoxException(429, "TorBox ограничил частоту запросов. Попробуйте позже");
         if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized || resp.StatusCode == System.Net.HttpStatusCode.Forbidden)
             throw new TorBoxException(502, "TorBox отклонил запрос: проверьте API-ключ и доступность сервиса");
+        string text;
+        try { text = await resp.Content.ReadAsStringAsync(); }
+        catch { text = ""; }
+        JObject j = null;
+        if (!string.IsNullOrWhiteSpace(text)) {
+            try { j = JObject.Parse(text); }
+            catch { j = null; }
+        }
+        // requestdl/batch is optional. 405 and an explicit missing-endpoint body may try the
+        // other method. Auth, rate limits and validation stay errors; their body is not shown.
+        bool batch = path.StartsWith("requestdl/batch", StringComparison.Ordinal);
+        if (batch) {
+            string err = (string)j?["error"];
+            string detail = (string)j?["detail"] ?? "";
+            bool missing = string.Equals(err, "ENDPOINT_NOT_FOUND", StringComparison.Ordinal)
+                || detail.IndexOf("Endpoint not found", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (resp.StatusCode == System.Net.HttpStatusCode.MethodNotAllowed
+                || (missing && resp.StatusCode == System.Net.HttpStatusCode.NotFound))
+                throw new TorBoxException(404, "Пакетный запрос ссылок не поддерживается") { UnsupportedEndpoint = true };
+        }
         if (!resp.IsSuccessStatusCode && !(allowMissing && resp.StatusCode == System.Net.HttpStatusCode.NotFound))
             throw new TorBoxException(502, "Ошибка сервиса TorBox (HTTP " + (int)resp.StatusCode + ")");
-        var j = JObject.Parse(await resp.Content.ReadAsStringAsync());
+        if (j == null) throw new TorBoxException(502, "Не удалось обработать ответ TorBox");
         // TorBox reports an absent torrent as HTTP404 + ITEM_NOT_FOUND, even with success:true.
         if (allowMissing && path.StartsWith("mylist?id=", StringComparison.Ordinal) && (string)j["error"] == "ITEM_NOT_FOUND")return new JArray();
         if (!resp.IsSuccessStatusCode)throw new TorBoxException(502,"Не удалось проверить наличие раздачи TorBox");
         if ((bool?)j["success"] != true)
         {
             string code = (string)j["error"] ?? "UNKNOWN";
+            if (batch && code == "ENDPOINT_NOT_FOUND")
+                throw new TorBoxException(404, "Пакетный запрос ссылок не поддерживается") { UnsupportedEndpoint = true };
             // Never expose upstream detail/URLs: requestdl URLs contain the account API key.
             string message = code == "DOWNLOAD_NOT_FINISHED" ? "Загрузка в TorBox ещё не завершена" :
                 code == "ACTIVE_LIMIT" ? "Достигнут лимит активных загрузок TorBox" :
@@ -178,19 +200,26 @@ public partial class TorBoxController : BaseController
 
     JArray Rows(JToken data) => data is JArray a ? a : data is JObject o ? new JArray(o) : new JArray();
     object FileRow(JToken f) => new { id = (long?)f["id"] ?? -1, name = (string)f["short_name"] ?? (string)f["name"] ?? "Файл", size = (long?)f["size"] ?? 0 };
-    object TorrentRow(JToken t) => new {
-        id = (long?)t["id"] ?? -1,
-        airlocked = t["airlocked"]?.Type == JTokenType.Boolean ? (bool?)t["airlocked"] : null,
-        name = (string)t["name"] ?? "Раздача",
-        hash = (string)t["hash"],
-        film = ReadFilm(t),
-        ready = (bool?)t["download_present"] == true || (bool?)t["download_finished"] == true,
-        state = (string)t["download_state"] ?? "unknown",
-        progress = (double?)t["progress"] ?? 0,
-        size = (long?)t["size"] ?? 0,
-        speed = (long?)t["download_speed"] ?? 0,
-        files = (t["files"] as JArray ?? new JArray()).Select(FileRow).ToArray()
-    };
+    object TorrentRow(JToken t, bool includeFiles = true) {
+        var row = new {
+            id = (long?)t["id"] ?? -1,
+            airlocked = t["airlocked"]?.Type == JTokenType.Boolean ? (bool?)t["airlocked"] : null,
+            name = (string)t["name"] ?? "Раздача",
+            hash = (string)t["hash"],
+            film = ReadFilm(t),
+            ready = (bool?)t["download_present"] == true || (bool?)t["download_finished"] == true,
+            state = (string)t["download_state"] ?? "unknown",
+            progress = (double?)t["progress"] ?? 0,
+            size = (long?)t["size"] ?? 0,
+            speed = (long?)t["download_speed"] ?? 0,
+            files = includeFiles ? (t["files"] as JArray ?? new JArray()).Select(FileRow).ToArray() : Array.Empty<object>()
+        };
+        if (includeFiles) return row;
+        // An omitted files array is not "this torrent has no videos".
+        var listed = JObject.FromObject(row);
+        listed.Remove("files");
+        return listed;
+    }
 
     [HttpGet, AllowAnonymous, Route("torbox.js")]
     public ActionResult Plugin()
@@ -213,16 +242,19 @@ public partial class TorBoxController : BaseController
     }
 
     [HttpGet, Route("torbox/list")]
-    public Task<ActionResult> List(int offset = 0) => Guard(async (c, key) => {
+    public Task<ActionResult> List(int offset = 0, bool active = false) => Guard(async (c, key) => {
         if (offset < 0 || offset > 100000) return Error(400, "Некорректная страница");
-        var rows = Rows(await Call("mylist?limit=100&offset=" + offset, key));
-        return Payload(new { success = true, data = rows.Select(TorrentRow).ToArray(), more = rows.Count == 100, deletion_scope = DeletionScope(key) });
+        // files=false is list-only. OwnedTorrents still needs the file list for readiness and series.
+        string path = "mylist?limit=100&offset=" + offset + "&files=false";
+        if (active) path += "&active=true";
+        var rows = Rows(await Call(path, key));
+        return Payload(new { success = true, data = rows.Select(t => TorrentRow(t, false)).ToArray(), more = rows.Count == 100, deletion_scope = DeletionScope(key), active });
     });
 
     [HttpGet, Route("torbox/item")]
     public Task<ActionResult> Item(long id) => Guard(async (c, key) => {
         if (id < 0) return Error(400, "Некорректная раздача");
-        var rows = Rows(await Call("mylist?id=" + id + "&bypass_cache=true", key));
+        var rows = Rows(await Call("mylist?id=" + id + "&bypass_cache=true&files=true", key));
         var t = rows.FirstOrDefault(x => (long?)x["id"] == id);
         return t == null ? Error(404, "Раздача отсутствует в TorBox") : Payload(new { success = true, data = TorrentRow(t) });
     });
@@ -444,7 +476,7 @@ public partial class TorBoxController : BaseController
     [HttpPost, Route("torbox/play"), RequestSizeLimit(4096)]
     public Task<ActionResult> Play([FromBody] PlayInput input) => Guard(async (c, key) => {
         if (input == null || input.id < 0 || input.file < 0) return Error(400, "Некорректный файл");
-        var rows = Rows(await Call("mylist?id=" + input.id, key));
+        var rows = Rows(await Call("mylist?id=" + input.id + "&files=true", key));
         var t = rows.FirstOrDefault(x => (long?)x["id"] == input.id);
         if (t == null) return Error(404, "Раздача отсутствует в TorBox");
         if (!((bool?)t["download_present"] == true || (bool?)t["download_finished"] == true)) return Error(409, "Раздача ещё загружается в TorBox");
@@ -460,6 +492,7 @@ public partial class TorBoxController : BaseController
 
     class TorBoxException : Exception {
         public int Status;
+        public bool UnsupportedEndpoint;
         public TorBoxException(int status, string message) : base(message) { Status = status; }
     }
 }
