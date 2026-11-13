@@ -109,9 +109,22 @@ def release_hashes():
             result[path] = digest
         if not result:
             raise ValueError('empty manifest')
+        overrides_path = f'{RELEASE}/overrides.json'
+        if os.path.isfile(overrides_path):
+            overrides = json.load(open(overrides_path, encoding='utf-8'))
+            if not isinstance(overrides, dict) or overrides.get('release_manifest_sha256') != sha(f'{RELEASE}/overlay.sha256'):
+                raise ValueError('local patches belong to a different release')
+            patches = overrides.get('files')
+            if not isinstance(patches, dict) or not patches:
+                raise ValueError('empty local patch ledger')
+            for path, patch in patches.items():
+                if not isinstance(patch, dict) or path not in result or patch.get('base_sha256') != result[path] or not re.fullmatch('[a-f0-9]{64}', str(patch.get('sha256', ''))):
+                    raise ValueError('invalid local patch entry')
+                result[path] = patch['sha256']
+            say('INFO', f'{len(patches)} recorded local patches over the installed release')
         return result
     except (OSError, ValueError):
-        say('FAIL', 'installed release manifest is missing or invalid')
+        say('FAIL', 'installed release manifest or local patch ledger is missing or invalid')
         return {}
 
 

@@ -47,10 +47,28 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/app" "$REPO_ROOT/dist"
 
 url="https://github.com/${UPSTREAM_REPO}/releases/download/${TAG}/${ZIP_NAME}"
-echo ">> качаю $url"
-curl -fSL --retry 3 -o "$work/upstream.zip" "$url" || {
-  echo "Не удалось скачать релиз $TAG" >&2; exit 1
-}
+cache_dir=${LAMPAC_BUILD_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/lampac-build}
+cache_key=$(printf '%s' "$url" | sha256sum | cut -d' ' -f1)
+mkdir -p "$cache_dir"
+(
+  # Keep concurrent builds from publishing a partial or mismatched cache entry.
+  flock -x 9
+  if [ -f "$cache_dir/$cache_key.zip" ] && [ -f "$cache_dir/$cache_key.sha256" ] &&
+     [ "$(sha256sum "$cache_dir/$cache_key.zip" | cut -d' ' -f1)" = "$(cat "$cache_dir/$cache_key.sha256")" ]; then
+    echo ">> исходный релиз $TAG из кэша (SHA-256 проверен)"
+  else
+    echo ">> качаю $url"
+    curl -fSL --retry 3 -o "$work/upstream.zip" "$url" || {
+      echo "Не удалось скачать релиз $TAG" >&2; exit 1
+    }
+    unzip -tq "$work/upstream.zip" > /dev/null
+    digest=$(sha256sum "$work/upstream.zip" | cut -d' ' -f1)
+    printf '%s\n' "$digest" > "$work/upstream.sha256"
+    mv "$work/upstream.zip" "$cache_dir/$cache_key.zip"
+    mv "$work/upstream.sha256" "$cache_dir/$cache_key.sha256"
+  fi
+  cp "$cache_dir/$cache_key.zip" "$work/upstream.zip"
+) 9> "$cache_dir/$cache_key.lock"
 unzip -oq "$work/upstream.zip" -d "$work/app"
 
 # Если архив содержит единственный корневой каталог — поднимаем его наверх

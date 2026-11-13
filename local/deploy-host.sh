@@ -65,6 +65,8 @@ chmod 0700 "$STATE"
 install -m 0600 "$work/overlay.sha256" "$STATE/overlay.sha256"
 install -m 0600 "$work/build-info.txt" "$STATE/build-info.txt"
 printf '%s\n' "$TAG" > "$STATE/version.txt"
+# A fully verified release replaces previously recorded local patches.
+rm -f "$STATE/overrides.json"
 install -m 0700 "$ROOT/release-tools/lampac-postupdate-check.py" /root/lampac_postupdate_check.py
 # Source changes may otherwise leave old generated scripts on disk for hours.
 # Do not touch database/media caches; only obsolete generated Online/TorBox scripts.

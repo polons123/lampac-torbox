@@ -68,6 +68,30 @@ with tempfile.TemporaryDirectory() as folder:
     manifest.write_text(f'{digest}  module/Online/plugin.js\n')
     archive.write_bytes(archive.read_bytes() + b'tampered')
     assert preflight() != 0
+    # A local patch must be bound to the original release and its original file hash.
+    (app / 'version.txt').write_text('custom-test')
+    base_manifest = f'{digest}  module/Online/plugin.js\n'
+    (release / 'overlay.sha256').write_text(base_manifest)
+    target.write_text('reviewed local patch')
+    replacement = hashlib.sha256(target.read_bytes()).hexdigest()
+    ledger = {'release_manifest_sha256': hashlib.sha256(base_manifest.encode()).hexdigest(),
+              'files': {'module/Online/plugin.js': {'base_sha256': digest, 'sha256': replacement}}}
+    (release / 'overrides.json').write_text(json.dumps(ledger))
+    check.out.clear(); check.verify_release()
+    assert not any(level == 'FAIL' for level, _ in check.out), check.out
+    assert (release / 'overlay.sha256').read_text() == base_manifest
+    target.write_text('unrecorded drift')
+    check.out.clear(); check.verify_release()
+    assert any(level == 'FAIL' for level, _ in check.out)
+    ledger['files']['module/Online/plugin.js']['base_sha256'] = '0' * 64
+    (release / 'overrides.json').write_text(json.dumps(ledger))
+    check.out.clear(); assert check.release_hashes() == {}
+    ledger['files']['module/Online/plugin.js']['base_sha256'] = digest
+    ledger['release_manifest_sha256'] = '0' * 64
+    (release / 'overrides.json').write_text(json.dumps(ledger))
+    check.out.clear(); assert check.release_hashes() == {}
+    (release / 'overrides.json').write_text('[]')
+    check.out.clear(); assert check.release_hashes() == {}
 for name in ('deploy-host.sh', 'build-release.sh'):
     subprocess.run(['bash', '-n', str(here / name)], check=True)
 print('PASS: manifest drift, snapshot refusal, version mismatch, path validation, CSS tracking, archive/manifest tampering and shell syntax')

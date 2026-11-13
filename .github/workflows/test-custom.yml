@@ -1,0 +1,56 @@
+name: Test custom TorBox and release tools
+
+on:
+  push:
+    branches: [custom]
+  pull_request:
+    branches: [custom]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  custom:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22'
+      - uses: actions/setup-dotnet@v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+      - name: Offline checks
+        run: |
+          python3 -m unittest discover -s local/tests -p 'test_*.py'
+          python3 local/test_release_tools.py
+          python3 local/test_build_cache.py
+          node local/tests/torbox_library.cjs
+          node local/tests/torbox_series.cjs
+          node local/tests/torbox_infuse.cjs
+          node --check Modules/TorBox/plugin.js
+          bash -n local/build-release.sh local/deploy-host.sh
+          git diff --check
+      - name: Download public runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download 1.87.10 --repo lampac-nextgen/lampac --pattern lampac-nextgen.zip --dir "$RUNNER_TEMP/lampac-public"
+          gh api repos/lampac-nextgen/lampac/releases/tags/1.87.10 > "$RUNNER_TEMP/lampac-public/release.json"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, zipfile
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'lampac-public'
+          asset = next(a for a in json.loads((root/'release.json').read_text())['assets'] if a['name'] == 'lampac-nextgen.zip')
+          archive = root/'lampac-nextgen.zip'
+          digest = 'sha256:' + hashlib.file_digest(archive.open('rb'), 'sha256').hexdigest()
+          assert asset.get('digest') == digest, 'official asset digest mismatch or absent'
+          with zipfile.ZipFile(archive) as z:
+              for item in z.infolist():
+                  path = pathlib.PurePosixPath(item.filename)
+                  assert not path.is_absolute() and '..' not in path.parts, 'unsafe archive path'
+              z.extractall(root/'runtime')
+          PY
+      - name: Isolated module compilation and HTTP regression
+        run: python3 local/tests/torbox_http.py --runtime "$RUNNER_TEMP/lampac-public/runtime"
