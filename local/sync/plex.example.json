@@ -1,0 +1,7 @@
+{
+  "plex_url": "http://127.0.0.1:32400",
+  "plex_token": "YOUR_PLEX_TOKEN",
+  "lampac_url": "http://127.0.0.1:19092",
+  "lampac_user": "viewer@example.test",
+  "state_file": "state/plex.json"
+}

@@ -1,0 +1,10 @@
+{
+  "hosts": {
+    "primary": "https://lampac-primary.example",
+    "secondary": "https://lampac-secondary.example"
+  },
+  "local_base": "http://127.0.0.1:19092",
+  "role_file": "role",
+  "accounts_file": "accounts.json",
+  "state_dir": "state"
+}
