@@ -407,13 +407,15 @@ try:
 
     items.clear()
     items[10] = torrent(A, 10, [1, 2])
-    rows[:] = [row(A)]
+    rows[:] = [row(A), row(B)]
     state["metadata_mode"] = "normal"
     reset()
     root_path = "/lite/torbox?title=Mock%20Show&original_title=Mock%20Show&year=2020"
     for serial, label in [(0, "movie"), (1, "series")]:
+        before_streams = len(state["streams"])
         code, native = api(root_path + "&serial=" + str(serial) + "&rjson=true")
-        check("native " + label + " search returns standard JSON rows", code == 200 and native.get("type") == "similar" and bool(native.get("data")))
+        check("native " + label + " search returns standard JSON rows", code == 200 and native.get("type") == ("movie" if serial == 0 else "similar") and bool(native.get("data")))
+        check("native " + label + " search does not start streams", len(state["streams"]) == before_streams)
         depth = 0
         while native.get("type") == "similar":
             entries = native["data"]
@@ -426,10 +428,51 @@ try:
             code, native = api(url.path + "?" + url.query)
             depth += 1
             assert code == 200 and depth < 12, (code, depth)
-        check("native " + label + " reaches standard call item", native.get("type") == "movie" and native["data"][0]["method"] == "call")
+        check("native " + label + " reaches standard video item", native.get("type") == "movie" and native["data"][0]["method"] == ("play" if serial == 0 else "call"))
         url = urllib.parse.urlsplit(native["data"][0]["url"])
-        code, video = api(url.path + "?" + url.query)
-        check("native " + label + " resolves a standard playable video", code == 200 and video.get("method") == "play" and video["url"].startswith("https://"))
+        if serial == 0:
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+            def media_response(address):
+                try:
+                    with urllib.request.build_opener(NoRedirect()).open(address, timeout=20) as response:
+                        return response.status, response.headers.get("Location")
+                except urllib.error.HTTPError as error:
+                    return error.code, error.headers.get("Location")
+            check("native release selector exposes every candidate", len(native["voice"]) == len(native["data"]) == 2 and all("options?pick=" in v["url"] for v in native["voice"]))
+            check("native movie exposes resolution choices", "1080p" in native["data"][0]["quality"] and "720p" in native["data"][0]["quality"])
+            before_original = len(state["streams"])
+            code, location = media_response(native["data"][0]["quality"]["Файл без изменений"])
+            check("original file uses requestdl without creating a stream", code == 302 and location.startswith("https://cdn.example/file/") and len(state["streams"]) == before_original and state["links"][-1][0] == "single")
+            code, location = media_response(native["data"][0]["url"])
+            check("native movie resolves through an authenticated media redirect", code == 302 and location.startswith("https://"))
+            menu_url = urllib.parse.urlsplit(native["voice"][0]["url"])
+            code, options = api(menu_url.path + "?" + menu_url.query)
+            check("native options expose files, audio and subtitles", code == 200 and any(v["name"].startswith("Файл:") for v in options["voice"]) and any(v["name"].startswith("Аудио:") for v in options["voice"]) and any(v["name"].startswith("Субтитры:") for v in options["voice"]))
+            original_url = urllib.parse.urlsplit(next(v["url"] for v in options["voice"] if "original=true" in v["url"]))
+            before_original = len(state["streams"])
+            code, original = api(original_url.path + "?" + original_url.query)
+            check("original-file mode preserves all tracks and skips stream setup", code == 200 and original["data"][0]["method"] == "play" and "/lite/torbox/file?" in original["data"][0]["url"] and len(state["streams"]) == before_original)
+            direct = urllib.parse.urlsplit(original["data"][0]["url"])
+            direct_query = {k: v[0] for k, v in urllib.parse.parse_qs(direct.query).items() if k not in ("token", "uid", "account_email")}
+            direct_query["account_email"] = second
+            before_links = len(state["links"])
+            code, _ = media_response(app_url + direct.path + "?" + urllib.parse.urlencode(direct_query))
+            check("original-file link stays bound to its owner", code == 410 and len(state["links"]) == before_links)
+            code, options = api(menu_url.path + "?" + menu_url.query)
+            audio_url = next(v["url"] for v in options["voice"] if v["name"].startswith("Аудио:") and "audio=1&" in v["url"])
+            audio_url = urllib.parse.urlsplit(audio_url)
+            code, options = api(audio_url.path + "?" + audio_url.query)
+            sub_url = next(v["url"] for v in options["voice"] if v["name"].startswith("Субтитры:") and v["url"].endswith("&sub=0&rjson=true"))
+            sub_url = urllib.parse.urlsplit(sub_url)
+            code, options = api(sub_url.path + "?" + sub_url.query)
+            check("native subtitle selection retains the chosen audio", code == 200 and "audio=1&sub=0" in options["data"][0]["quality"]["720p"])
+            code, location = media_response(options["data"][0]["quality"]["720p"])
+            check("native selected parameters reach the stream API", code == 302 and location.startswith("https://") and state["streams"][-1].get("chosen_audio_index") == ["1"] and state["streams"][-1].get("chosen_subtitle_index") == ["0"] and state["streams"][-1].get("chosen_resolution_index") == ["4"])
+        else:
+            code, video = api(url.path + "?" + url.query)
+            check("native " + label + " resolves a standard playable video", code == 200 and video.get("method") == "play" and video["url"].startswith("https://"))
     for suffix, label in [("", "default"), ("&rjson=false", "explicit HTML"), ("&rjson=true&nojson=true", "web nojson override")]:
         code, html = get(root_path + suffix)
         check("legacy " + label + " retains browser metadata and HTML", code == 200 and "data-json='" in html and "torbox_voice_options" in html)

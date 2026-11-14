@@ -3,6 +3,10 @@
 - Fix empty TorBox lists in native Lampa: honor `rjson=true` through the complete
   movie/episode selection flow and return standard playable-video JSON. Keep the
   existing HTML/browser behavior, including the explicit `nojson` override.
+- Expose all native film releases and file/audio/subtitle options through standard
+  selectors, with resolution choices on playable media URLs.
+- Keep an explicit “Файл без изменений” direct-file mode using `requestdl`,
+  preserving original tracks without creating a transcoding stream.
 - Merge official Lampac 1.90.0, retaining the existing custom TorBox/media/UI overlay.
 - Include TimeCode capability 4: separate action and viewing dates, with automatic
   migration of old typed and legacy JSON databases.

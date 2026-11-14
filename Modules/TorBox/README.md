@@ -31,11 +31,17 @@ Never commit either runtime configuration file or database state.
 
 ## Library and playback
 
-- Native clients can request standard Lampac JSON with `rjson=true`. Search,
-  file/episode, resolution, audio and subtitle menus preserve that format through
-  the final `call` item and playable video response. Requests without the flag,
-  `rjson=false` or the web adapter's `nojson` flag retain the existing HTML and
-  browser metadata. Browser/Android JS extensions remain available.
+- Native clients request standard Lampac JSON with `rjson=true`. Film results
+  expose every release through the standard voice selector. Opening its options
+  exposes video files, audio tracks and subtitle tracks; playback URLs offer
+  available resolutions. Series menus retain JSON through the final video call.
+  Requests without the flag, `rjson=false` or the web adapter's `nojson` flag
+  retain HTML and browser metadata. Browser/Android JS extensions remain available.
+- “Файл без изменений” requests a direct original-file URL through `requestdl`.
+  This mode skips stream creation and transcoding and preserves all original
+  tracks. It is separate from original-resolution HLS, which is still a TorBox
+  stream. The direct-file option is also available in the browser playback menu.
+  File/release ownership and ready-file checks apply before requesting the URL.
 - “Мой TorBox” requests `mylist` with `files=false`. Opening a torrent requests
   `files=true`. Inventory used for episode matching keeps file details.
 - “Сейчас качается” uses a separate `active=true` request and independent paging.

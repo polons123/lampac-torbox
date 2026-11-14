@@ -30,7 +30,10 @@ The checks cover variant continuation, ambiguity stops, ownership, lazy file
 loading, active paging, batch order/schema, unsupported-endpoint fallback and
 failures that must not fall back. Requests use temporary loopback ports only.
 They also walk complete native `rjson=true` movie/series menus to the final
-video response and verify default/explicit/nojson HTML compatibility.
+video response and verify default/explicit/nojson HTML compatibility. Movie
+checks verify all release choices, selected stream parameters, media redirects,
+and original-file `requestdl` playback without stream creation, including owner
+isolation. Actual native-device selector rendering remains a manual check.
 The JS harness checks the library UI's lazy-loading/filter request behavior.
 
 GitHub Actions runs the same checks and downloads the public runtime without
