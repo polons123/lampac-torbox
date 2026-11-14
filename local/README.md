@@ -3,7 +3,7 @@
 Commit reviewed sources, create an immutable custom tag, then build from that tag:
 
 ```sh
-local/build-release.sh 1.90.0 custom-v1.90.0-1
+local/build-release.sh 1.90.0 custom-v1.90.0-2
 python3 local/test_release_tools.py
 ```
 

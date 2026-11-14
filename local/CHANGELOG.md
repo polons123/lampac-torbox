@@ -1,4 +1,4 @@
-# Correction — restore existing TorBox integration
+# custom-v1.90.0-2 — restore existing TorBox integration
 
 Restored TorBox balancer, browser playback, My TorBox and settings from the November 13 sources. Removed only November 14 TorBox native Apple TV experiments. Deployment preserves TorBox configuration and library data. Current Lampac 1.90, TimeCode 4, authentication and media fixes remain.
 
