@@ -32,12 +32,7 @@ MARKERS = {
     'module/Tracks/manifest.json': ['"enable": true'],
     'module/AdminPanel/manifest.json': ['"enable": true'],
     'module/Telemetry/manifest.json': ['"enable": true'],
-    'mods/TorBox/Controller.cs': ['torbox/metadata', 'RememberFilm'],
-    'mods/TorBox/Delete.cs': ['torbox/delete/check', 'operation="delete",all=false', 'deletion_confirmed'],
-    'mods/TorBox/Inventory.cs': ['offset=', 'entry.Generation'],
     'module/AdminPanel/AdminPanelController.cs': ['UnixCreateMode', 'UnixFileMode.UserRead|UnixFileMode.UserWrite'],
-    'mods/TorBox/Online.cs': ['Разрешение: исходное', 'quality=new JObject()'],
-    'mods/TorBox/plugin.js': ['Удалить из TorBox', 'confirmed: true'],
 }
 # init.conf values that carry a fix (compared with the baseline): dotted paths
 CONF_KEYS = ['LampaWeb.tree', 'LampaWeb.cssReplace', 'Phantom.m4s', 'Redheadsound.enable', 'Aladin.enable', 'PidTor.enable',
@@ -251,8 +246,6 @@ def check():
         if path == 'online.js' and code == 200 and 'pfApply' not in body:
             code, extra = -1, ' (200 but no filter code: stale disk cache? see memory note: stop lampac, delete cache/static/*online-prestige*)'
         say('OK' if code in ok else 'FAIL', f'/{path} -> {code}{extra}')
-    if any(p.startswith('mods/TorBox/') for p in hashes):
-        say('OK' if 'loaded module: TorBox' in log else 'FAIL', 'TorBox module loaded at last start')
     code, css = http('lampa-main/css/app.css')
     say('OK' if code == 200 and '.noty { background: #303030 !important; color: #fff !important; }' in css else 'FAIL', 'served notification CSS is dark grey with white text')
 

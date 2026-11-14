@@ -45,7 +45,6 @@ class Instance:
         (root / "runtimes").symlink_to(args.runtime.resolve() / "runtimes", target_is_directory=True)
         for module in ("NativeAppleTV", "Sync/Sync", "Sync/TimeCode", "Sync/SyncEvents"):
             shutil.copytree(args.modules / module, root / "module" / module)
-        shutil.copytree(args.torbox, root / "mods/TorBox")
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             self.port = sock.getsockname()[1]
@@ -64,7 +63,6 @@ class Instance:
         (root / "base.conf").write_text("{}")
         (root / "appsettings.Production.json").write_text("{}")
         (root / "passwd").write_text("fixture-admin-password")
-        (root / "torbox-private.json").write_text(json.dumps({"api_key": "fixture-key", "allowed_uids": [VIEWER]}))
         (root / "database").mkdir()
         with sqlite3.connect(root / "database/TimeCode.sql") as db:
             if legacy_blob:
@@ -137,7 +135,6 @@ def main():
     parser.add_argument("--runtime", required=True, type=Path)
     parser.add_argument("--dotnet", default=shutil.which("dotnet"))
     parser.add_argument("--modules", type=Path, default=REPO / "Modules")
-    parser.add_argument("--torbox", type=Path, default=REPO / "Modules/TorBox")
     args = parser.parse_args()
     if not args.dotnet:
         parser.error("dotnet is required")
@@ -164,9 +161,7 @@ def main():
         check("web and bot confirmation issue distinct tokens", first != second and len(first) == len(second) == 32)
         check("a consumed code cannot return a token again", a.request("/nativeappletv/auth/poll", {"code": used_code})[0] == 410)
         check("both device tokens resolve to the existing account", all(a.request("/api/capabilities", token=t)[1]["uid"] == VIEWER for t in [first, second]))
-        check("native token keeps TorBox allowlist access", a.request("/torbox/status", token=first)[0] == 200)
         outside, _ = a.issue(OTHER)
-        check("another valid account remains outside the TorBox allowlist", a.request("/torbox/status", token=outside)[0] == 403)
         check("native tokens see the existing viewing history", a.rows(token=first) == a.rows(token=second) == a.rows())
         watched = {"id": "movie-10", "card": "10_movie", "hash": "777", "position": 0, "percent": 100, "duration": 100, "watched_at": 1000, "changed_at": 9000}
         result = a.request("/timecode/set", {"rows": [watched]}, token=first)[1]

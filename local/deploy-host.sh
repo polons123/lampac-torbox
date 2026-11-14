@@ -68,18 +68,24 @@ printf '%s\n' "$TAG" > "$STATE/version.txt"
 # A fully verified release replaces previously recorded local patches.
 rm -f "$STATE/overrides.json"
 install -m 0700 "$ROOT/release-tools/lampac-postupdate-check.py" /root/lampac_postupdate_check.py
-# Source changes may otherwise leave old generated scripts on disk for hours.
-# Do not touch database/media caches; only obsolete generated Online/TorBox scripts.
-python3 - "$ROOT" <<'PY'
-import pathlib,sys
-root=pathlib.Path(sys.argv[1]);removed=0
-for path in (root/'cache').rglob('*'):
- if not path.is_file() or path.stat().st_size>3000000:continue
- data=path.read_bytes()
- if (b'var torboxVoiceMenu = null;' in data and b'torbox_voice_options' in data) or (b'window.lampac_torbox_loaded' in data and b'window.lampac_torbox_headers' in data):
-  path.unlink();removed+=1
-print('Generated script cache entries removed:',removed)
-PY
+# Retire the removed custom TorBox integration (mods/ is installer-protected).
+systemctl stop lampac
+python3 - "$ROOT" <<'PYREMOVE'
+import json,pathlib,shutil,sys
+root=pathlib.Path(sys.argv[1])
+for name in ['mods/TorBox','wwwroot/plugins/torbox','torbox-private.json','torbox-settings.json','database/torbox-library.json','database/torbox-series.json']:
+ p=root/name
+ if p.is_dir():shutil.rmtree(p)
+ elif p.exists():p.unlink()
+p=root/'init.conf';d=json.loads(p.read_text(encoding='utf-8-sig'))
+plugins=d.get('LampaWeb',{}).get('customPlugins',[])
+d.get('LampaWeb',{})['customPlugins']=[x for x in plugins if 'torbox' not in str(x).lower()]
+d.pop('TorBox',None);p.write_text(json.dumps(d,ensure_ascii=False,indent=2)+'\n')
+p=root/'excludes.conf'
+if p.exists():p.write_text('\n'.join(x for x in p.read_text().splitlines() if 'torbox' not in x.lower())+'\n')
+for p in (root/'cache').rglob('*'):
+ if p.is_file() and p.stat().st_size<3000000 and b'torbox' in p.read_bytes().lower():p.unlink()
+PYREMOVE
 # Reload the process even for an equal-source reinstall, to discard in-memory scripts.
 if [ "$changed" -gt 0 ]; then systemctl start lampac; else systemctl restart lampac; fi
 systemctl is-active --quiet lampac

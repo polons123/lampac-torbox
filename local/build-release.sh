@@ -9,7 +9,6 @@
 #   LAMPAC_GITHUB_REPO=polons123/lampac-torbox bash install.sh --update --tag <тег релиза>
 #
 # Оверлеем считаются файлы, отличающиеся от базы из local/base. Соответствие путей:
-#   Modules/TorBox/*  -> mods/TorBox/*   наши модули лежат вне дерева upstream
 #   Modules/*         -> module/*        dotnet publish: ../Modules/** -> module/
 #   Online/*          -> module/Online/*
 #   local/wwwroot/*   -> wwwroot/*
@@ -34,7 +33,6 @@ map_path() {
   case "$1" in
     local/lampac-postupdate-check.py) printf 'release-tools/lampac-postupdate-check.py\n' ;;
     local/wwwroot/*)  printf 'wwwroot/%s\n'   "${1#local/wwwroot/}" ;;
-    Modules/TorBox/*) printf 'mods/TorBox/%s\n' "${1#Modules/TorBox/}" ;;
     Modules/*)        printf 'module/%s\n'    "${1#Modules/}" ;;
     Online/*)         printf 'module/Online/%s\n' "${1#Online/}" ;;
     .gitignore|local/*) return 1 ;;

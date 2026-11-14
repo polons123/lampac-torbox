@@ -1,4 +1,4 @@
-name: Test custom TorBox and release tools
+name: Test custom Lampac and release tools
 
 on:
   push:
@@ -27,10 +27,7 @@ jobs:
           python3 -m unittest discover -s local/tests -p 'test_*.py'
           python3 local/test_release_tools.py
           python3 local/test_build_cache.py
-          node local/tests/torbox_library.cjs
-          node local/tests/torbox_series.cjs
-          node local/tests/torbox_infuse.cjs
-          node --check Modules/TorBox/plugin.js
+          node --check Online/plugin.js
           bash -n local/build-release.sh local/deploy-host.sh
           git diff --check
       - name: Download public runtime
@@ -52,7 +49,5 @@ jobs:
                   assert not path.is_absolute() and '..' not in path.parts, 'unsafe archive path'
               z.extractall(root/'runtime')
           PY
-      - name: Isolated module compilation and HTTP regression
-        run: python3 local/tests/torbox_http.py --runtime "$RUNNER_TEMP/lampac-public/runtime"
       - name: Native Apple TV authorization and TimeCode migration
         run: python3 local/tests/native_sync_http.py --runtime "$RUNNER_TEMP/lampac-public/runtime"

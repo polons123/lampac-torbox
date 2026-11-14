@@ -40,7 +40,7 @@ release or silently accepting arbitrary source drift.
 
 Configuration is host-owned and retained. In particular, LampaWeb.cssReplace and
 its served dark notification CSS are checked by the post-update tool. Client and
-TorBox account configuration are never copied from another host or published.
+account configuration are never copied from another host or published.
 An optional private `/root/lampac-check-hosts.json` supplies the checker fleet roster
 as `[["local", null], ["peer", ["ssh", "-tt", "user@host"]]]`.
 
@@ -55,8 +55,7 @@ Preserve the previous three release files for rollback. A release built again
 can have different ZIP timestamps; the recorded source commit and per-file
 manifest identify its code.
 
-The [TorBox module](../Modules/TorBox/README.md) and [optional sync tools](sync/README.md)
-have separate configuration. Sync examples are source-only and never installed
+The [optional sync tools](sync/README.md) have separate configuration. Sync examples are source-only and never installed
 by the overlay. Actual device playback, seeking, resuming and Infuse handoff
 remain manual checks before promoting a candidate to a stable release.
 

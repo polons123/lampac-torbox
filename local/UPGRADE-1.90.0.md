@@ -1,14 +1,14 @@
 # Custom 1.90.0 upgrade notes
 
 This candidate includes the official 1.90.0 Core, NativeAppleTV and TimeCode 4,
-with the existing custom TorBox, media and client changes. It requires a full
-custom package upgrade; replacing only `mods/TorBox/` leaves the old Core running.
+with custom media and client changes. The custom TorBox integration has been
+removed; use the native client connection. A full package upgrade is required.
 
 ## Before installing
 
 Back up the previous application/release state and take consistent snapshots of
 the databases, including SQLite WAL state. Also preserve `init.conf`, `users.json`
-when present, all private TorBox configuration, `excludes.conf` and the configured
+when present, `excludes.conf` and the configured
 sync scripts/state. Keep each host's own configuration and credentials.
 Deploy one host at a time and verify it before upgrading its peer.
 
@@ -32,10 +32,10 @@ administrator password; the bot hook is closed until `bot_secret` is configured.
 During confirmation, enter the **existing Lampac user ID** in the optional user
 field, for example `viewer@example.test`. Matching normalizes case and whitespace.
 This appends the device token to that user's aliases, preserving the canonical
-identity, history, bookmarks, expiry, ban and TorBox allowlist membership. Use
+identity, history, bookmarks, expiry and ban. Use
 the same canonical user on every instance where that person's history belongs.
 An empty user field creates a separate account; it does not inherit an existing
-user's data or TorBox access. Tokens issued on one host are not automatically
+user's data. Tokens issued on one host are not automatically
 issued on its peer; sign in separately or use an operator-managed account setup.
 
 Behind a reverse proxy, explicitly set `NativeAppleTV.public_url` to the intended
@@ -47,7 +47,7 @@ tokens, public URLs or bot settings are supplied by this custom release.
 
 Confirm version, manifest hashes, module compilation, `/api/capabilities`
 (`features.timecode = 4` and the native source manifest), account authentication,
-TorBox list/item/filter, and configured sync dry-runs. Bind a device to the
+configured sync dry-runs. Bind a device to the
 intended account and verify its history before adding more devices. Check real
 playback, seeking and resume separately on the device.
 
