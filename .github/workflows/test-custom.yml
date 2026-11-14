@@ -28,6 +28,7 @@ jobs:
           python3 local/test_release_tools.py
           python3 local/test_build_cache.py
           node --check Online/plugin.js
+          node local/tests/media_ui.cjs
           bash -n local/build-release.sh local/deploy-host.sh
           git diff --check
       - name: Download public runtime
@@ -51,3 +52,5 @@ jobs:
           PY
       - name: Native Apple TV authorization and TimeCode migration
         run: python3 local/tests/native_sync_http.py --runtime "$RUNNER_TEMP/lampac-public/runtime"
+      - name: Media probe and PidTor regression
+        run: python3 local/tests/media_http.py --runtime "$RUNNER_TEMP/lampac-public/runtime"

@@ -295,8 +295,14 @@
     listenStart();
   }
 
-  function appendSwarmStat(html, element) {
-    if (!element || !element.url) return;
+  function appendSwarmStat(html, element, live) {
+    var hash = element && element.pidtor && element.pidtor.hash || element && element.torrent_hash;
+    if (!/^[a-f0-9]{40}$/i.test(String(hash || ''))) {
+      var match = String(element && element.url || '').match(/(?:[?&]link=|\/lite\/pidtor\/(?:serial\/|s))([a-f0-9]{40})(?![a-f0-9])/i);
+      hash = match && match[1];
+    }
+    if (!hash) return function () {};
+    var alive = true, timer = null;
     var block = Lampa.Template.get('tracks_metainfo_block', {});
     block.find('.tracks-metainfo__label').text(Lampa.Lang.translate('tracks_swarm'));
     var item = $('<div class="tracks-metainfo__item tracks-metainfo__item--swarm"><div class="tracks-metainfo__column--name">' + Lampa.Lang.translate('tracks_swarm_loading') + '</div></div>');
@@ -304,26 +310,35 @@
     html.prepend(block);
     var net = new Lampa.Reguest();
     net.timeout(1000 * 15);
-    var url = connect_host + '/tracks/stat?media=' + encodeURIComponent(element.url);
+    var url = connect_host + '/tracks/stat?hash=' + encodeURIComponent(hash);
     var email = Lampa.Storage.get('account_email');
     if (email) url = Lampa.Utils.addUrlComponent(url, 'account_email=' + encodeURIComponent(email));
     var uid = Lampa.Storage.get('lampac_unic_id', '');
     if (uid) url = Lampa.Utils.addUrlComponent(url, 'uid=' + encodeURIComponent(uid));
     var token = '{token}';
     if (token != '') url = Lampa.Utils.addUrlComponent(url, 'token={token}');
+    function again() { if (alive && live) timer = setTimeout(update, 10000); }
+    function update() {
+    if (!alive) return;
     net["native"](url, function (str) {
+      if (!alive) return;
       var st = {};
       try {
         st = JSON.parse(str);
       } catch (e) { }
-      if (st.total === undefined) return block.remove();
+      if (st.total === undefined) { item.text('Нет данных о рое'); again(); return; }
       item.empty();
       item.append($('<div></div>').text(Lampa.Lang.translate('tracks_peers') + ': ' + st.active + ' / ' + st.total));
+      again();
     }, function () {
-      block.remove();
+      if (!alive) return;
+      item.text('Нет данных о рое'); again();
     }, false, {
       dataType: 'text'
     });
+    }
+    update();
+    return function () { alive = false; clearTimeout(timer); net.clear(); block.remove(); };
   }
 
   function parseMetainfo(data) {
@@ -421,9 +436,23 @@
     });
   }
 
+  var stopSwarm = null, swarmStart = null;
+  function clearSwarm() {
+    clearTimeout(swarmStart);
+    if (stopSwarm) stopSwarm();
+    stopSwarm = null;
+  }
   Lampa.Player.listener.follow('start', function (data) {
+    clearSwarm();
     if (data.torrent_hash) subscribeTracks(data);
+    swarmStart = setTimeout(function () {
+      var info = Lampa.PlayerInfo && Lampa.PlayerInfo.render();
+      var values = info && info.find('.player-info__values');
+      if (values && values.length) stopSwarm = appendSwarmStat(values, data, true);
+    }, 100);
   });
+  Lampa.Player.listener.follow('destroy', clearSwarm);
+  Lampa.Player.listener.follow('stop', clearSwarm);
   Lampa.Listener.follow('torrent_file', function (data) {
     if (data.type == 'list_open') list_opened = true;
     if (data.type == 'list_close') list_opened = false;

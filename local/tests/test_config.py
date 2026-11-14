@@ -43,6 +43,13 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(SYNC.DB_DIR, str(self.root / "database"))
         self.assertEqual(SYNC.META_PATH, str(self.root / "custom-state/peer-meta.json"))
 
+    def test_existing_operator_paths_can_be_preserved(self):
+        self.settings.update(meta_file="legacy-meta.json", work_dir="legacy-work")
+        self.configure()
+        self.assertEqual(SYNC.META_PATH, str(self.root / "legacy-meta.json"))
+        self.assertEqual(SYNC.WORK_DIR, str(self.root / "legacy-work"))
+        self.assertFalse((self.root / "legacy-work").exists())
+
     def test_invalid_configuration_rejected(self):
         variants = [[], {}, {"hosts": {"only": "https://one.example"}},
                     {"hosts": {"primary": "https://user:secret@one.example", "secondary": "https://two.example"}},

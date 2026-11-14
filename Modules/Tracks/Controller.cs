@@ -1,11 +1,10 @@
-﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Shared;
 using Shared.Attributes;
 using Shared.Services;
 using Shared.Services.Utilities;
 using System;
-using System.Collections.Concurrent;
 using System.Threading;
 using System.Linq;
 using System.Text;
@@ -17,8 +16,9 @@ namespace Tracks;
 
 public class TracksController : BaseController
 {
-    // single-flight: identical concurrent ffprobe requests run once, the rest reuse the result
-    static readonly ConcurrentDictionary<string, SemaphoreSlim> ffprobeGates = new();
+    // ponytail: 64 permanent stripes bound memory; collisions serialize unrelated probes.
+    static readonly SemaphoreSlim[] ffprobeGates = Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
+    static readonly System.Net.Http.HttpClient statHttp = FriendlyHttp.MessageClient("base", null, out _);
 
     [HttpGet, AllowAnonymous]
     [Staticache(cacheMinutes: 10, always: true, setHeadersNoCache: true)]
@@ -83,109 +83,130 @@ public class TracksController : BaseController
 
         string memKey = $"tracks:ffprobe:{media}";
         string outPut = null;
-        var gate = ffprobeGates.GetOrAdd(memKey, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync();
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
+        budget.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(ModInit.conf.ffprobe_timeout_seconds, 1, 120)));
+        var gate = ffprobeGates[(StringComparer.Ordinal.GetHashCode(memKey) & int.MaxValue) % ffprobeGates.Length];
+        try { await gate.WaitAsync(budget.Token); }
+        catch (OperationCanceledException) { return StatusCode(HttpContext.RequestAborted.IsCancellationRequested ? 499 : 504, "{}"); }
         try
         {
-        if (!hybridCache.TryGetValue(memKey, out outPut))
-        {
-            #region getFolder
-            static string getFolder(string magnethash)
+            if (!hybridCache.TryGetValue(memKey, out outPut))
             {
-                return $"database/tracks/{magnethash}";
-            }
-            #endregion
-
-            if (media.Contains("/stream/"))
-            {
-                magnethash = Regex.Match(media, "link=([a-z0-9]+)").Groups[1].Value;
-                string index = Regex.Match(media, @"index=([0-9]+)", RegexOptions.IgnoreCase).Groups[1].Value;
-
-                if (!string.IsNullOrWhiteSpace(magnethash))
-                    magnethash = $"{magnethash}_{index}";
-            }
-            else if (media.Contains("/lite/pidtor/"))
-            {
-                magnethash = Regex.Match(media, "/lite/pidtor/s([a-z0-9]+)").Groups[1].Value;
-                string index = Regex.Match(media, @"tsid=([0-9]+)", RegexOptions.IgnoreCase).Groups[1].Value;
-
-                if (!string.IsNullOrWhiteSpace(magnethash))
-                    magnethash = $"{magnethash}_{index}";
-            }
-
-            if (string.IsNullOrEmpty(magnethash))
-                magnethash = media;
-
-            // A cache key must never remain a user-controlled filesystem path.
-            magnethash = CrypTo.md5(magnethash);
-
-            if (System.IO.File.Exists(getFolder(magnethash)))
-                outPut = await BrotliTo.DecompressAsync(getFolder(magnethash));
-
-            if (string.IsNullOrWhiteSpace(outPut))
-            {
-                if (!Uri.TryCreate(media, UriKind.Absolute, out var uri) ||
-                    (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
-                    return ContentTo(showerror ? "uri" : "{}");
-
-                // retry quick failures (transient TorrServer 5xx): up to 3 attempts, 500ms/1000ms backoff;
-                // a slow empty result (dead torrent) is not retried
-                for (int attempt = 1; attempt <= 3; attempt++)
+                #region getFolder
+                static string getFolder(string magnethash)
                 {
-                    var started = DateTime.UtcNow;
-                    var process = new System.Diagnostics.Process();
-                    process.StartInfo.UseShellExecute = false;
-                    process.StartInfo.RedirectStandardOutput = true;
-                    process.StartInfo.StandardOutputEncoding = Encoding.UTF8;
-                    process.StartInfo.FileName = CoreInit.Win32NT ? "data/ffprobe.exe" : System.IO.File.Exists("data/ffprobe") ? "data/ffprobe" : "ffprobe";
+                    return $"database/tracks/{magnethash}";
+                }
+                #endregion
 
-                    process.StartInfo.ArgumentList.Add("-v");
-                    process.StartInfo.ArgumentList.Add("quiet");
-                    process.StartInfo.ArgumentList.Add("-print_format");
-                    process.StartInfo.ArgumentList.Add("json");
-                    process.StartInfo.ArgumentList.Add("-show_format");
-                    process.StartInfo.ArgumentList.Add("-show_streams");
-                    process.StartInfo.ArgumentList.Add(AccsDbInvk.Args(uri.AbsoluteUri, HttpContext));
+                if (media.Contains("/stream/"))
+                {
+                    magnethash = Regex.Match(media, "link=([a-z0-9]+)").Groups[1].Value;
+                    string index = Regex.Match(media, @"index=([0-9]+)", RegexOptions.IgnoreCase).Groups[1].Value;
 
-                    argumentList = process.StartInfo.FileName + " " + string.Join(" ", process.StartInfo.ArgumentList);
+                    if (!string.IsNullOrWhiteSpace(magnethash))
+                        magnethash = $"{magnethash}_{index}";
+                }
+                else if (media.Contains("/lite/pidtor/"))
+                {
+                    magnethash = Regex.Match(media, "/lite/pidtor/s([a-z0-9]+)").Groups[1].Value;
+                    string index = Regex.Match(media, @"tsid=([0-9]+)", RegexOptions.IgnoreCase).Groups[1].Value;
 
-                    process.Start();
-
-                    outPut = await process.StandardOutput.ReadToEndAsync();
-                    await process.WaitForExitAsync();
-
-                    if (!string.IsNullOrWhiteSpace(outPut) && Regex.Replace(outPut, "[\n\r\t ]+", "") != "{}")
-                        break;
-
-                    if (attempt == 3 || (DateTime.UtcNow - started).TotalSeconds > 5)
-                        break;
-
-                    await Task.Delay(500 * attempt);
+                    if (!string.IsNullOrWhiteSpace(magnethash))
+                        magnethash = $"{magnethash}_{index}";
                 }
 
-                if (outPut == null)
-                    outPut = string.Empty;
+                if (string.IsNullOrEmpty(magnethash))
+                    magnethash = media;
 
-                if (Regex.Replace(outPut, "[\n\r\t ]+", "") == "{}")
-                    outPut = string.Empty;
+                // A cache key must never remain a user-controlled filesystem path.
+                magnethash = CrypTo.md5(magnethash);
 
-                if (!string.IsNullOrWhiteSpace(outPut) && !string.IsNullOrWhiteSpace(magnethash))
+                if (System.IO.File.Exists(getFolder(magnethash)))
+                    outPut = await BrotliTo.DecompressAsync(getFolder(magnethash));
+
+                if (string.IsNullOrWhiteSpace(outPut))
                 {
-                    await BrotliTo.CompressAsync(getFolder(magnethash), outPut);
-                }
-                else
-                {
-                    // заглушка
-                    hybridCache.Set(memKey, outPut, DateTime.Now.AddMinutes(5), inmemory: true);
+                    if (!Uri.TryCreate(media, UriKind.Absolute, out var uri) ||
+                        (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+                        return ContentTo(showerror ? "uri" : "{}");
+
+                    // retry quick failures (transient TorrServer 5xx): up to 3 attempts, 500ms/1000ms backoff;
+                    // a slow empty result (dead torrent) is not retried
+                    for (int attempt = 1; attempt <= 3; attempt++)
+                    {
+                        var started = DateTime.UtcNow;
+                        using var process = new System.Diagnostics.Process();
+                        process.StartInfo.UseShellExecute = false;
+                        process.StartInfo.RedirectStandardOutput = true;
+                        process.StartInfo.RedirectStandardError = true;
+                        process.StartInfo.StandardOutputEncoding = Encoding.UTF8;
+                        process.StartInfo.FileName = CoreInit.Win32NT ? "data/ffprobe.exe" : System.IO.File.Exists("data/ffprobe") ? "data/ffprobe" : "ffprobe";
+
+                        process.StartInfo.ArgumentList.Add("-v");
+                        process.StartInfo.ArgumentList.Add("quiet");
+                        process.StartInfo.ArgumentList.Add("-print_format");
+                        process.StartInfo.ArgumentList.Add("json");
+                        process.StartInfo.ArgumentList.Add("-show_format");
+                        process.StartInfo.ArgumentList.Add("-show_streams");
+                        process.StartInfo.ArgumentList.Add(AccsDbInvk.Args(uri.AbsoluteUri, HttpContext));
+
+                        argumentList = process.StartInfo.FileName + " " + string.Join(" ", process.StartInfo.ArgumentList);
+
+                        process.Start();
+
+                        try
+                        {
+                            var stdout = process.StandardOutput.ReadToEndAsync(budget.Token);
+                            var stderr = process.StandardError.ReadToEndAsync(budget.Token);
+                            await Task.WhenAll(stdout, stderr, process.WaitForExitAsync(budget.Token));
+                            outPut = await stdout;
+                        }
+                        catch
+                        {
+                            if (!process.HasExited)
+                            {
+                                try { process.Kill(entireProcessTree: true); }
+                                catch (InvalidOperationException) { }
+                                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                            }
+                            throw;
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(outPut) && Regex.Replace(outPut, "[\n\r\t ]+", "") != "{}")
+                            break;
+
+                        if (attempt == 3 || (DateTime.UtcNow - started).TotalSeconds > 5)
+                            break;
+
+                        await Task.Delay(500 * attempt, budget.Token);
+                    }
+
+                    if (outPut == null)
+                        outPut = string.Empty;
+
+                    if (Regex.Replace(outPut, "[\n\r\t ]+", "") == "{}")
+                        outPut = string.Empty;
+
+                    if (!string.IsNullOrWhiteSpace(outPut) && !string.IsNullOrWhiteSpace(magnethash))
+                    {
+                        await BrotliTo.CompressAsync(getFolder(magnethash), outPut);
+                    }
+                    else
+                    {
+                        // заглушка
+                        hybridCache.Set(memKey, outPut, DateTime.Now.AddMinutes(5), inmemory: true);
+                    }
                 }
             }
         }
+        catch (OperationCanceledException)
+        {
+            return StatusCode(HttpContext.RequestAborted.IsCancellationRequested ? 499 : 504, "{}");
         }
         finally
         {
             gate.Release();
-            if (gate.CurrentCount == 1)
-                ffprobeGates.TryRemove(memKey, out _);
         }
 
         return ContentTo(string.IsNullOrEmpty(outPut) ? (showerror ? argumentList : "{}") : outPut);
@@ -193,24 +214,32 @@ public class TracksController : BaseController
 
     [HttpGet]
     [Route("tracks/stat")]
-    async public Task<ActionResult> Stat(string media)
+    async public Task<ActionResult> Stat(string media, string hash = null)
     {
-        string hash = Regex.Match(media ?? string.Empty, "(?:link=|/lite/pidtor/s)([a-f0-9]{40})", RegexOptions.IgnoreCase).Groups[1].Value.ToLower();
+        hash = string.IsNullOrEmpty(hash)
+            ? Regex.Match(media ?? string.Empty, @"(?:[?&]link=|/lite/pidtor/(?:serial/|s))([a-f0-9]{40})(?![a-f0-9])", RegexOptions.IgnoreCase).Groups[1].Value
+            : hash;
+        if (!Regex.IsMatch(hash, "^[a-fA-F0-9]{40}$"))
+            return ContentTo("{}");
+        hash = hash.ToLowerInvariant();
         if (hash == string.Empty || string.IsNullOrWhiteSpace(ModInit.conf.tsstat))
             return ContentTo("{}");
 
-        string memKey = $"tracks:stat:{hash}";
+        string memKey = $"tracks:stat:{ModInit.conf.tsstat}:{CrypTo.md5(ModInit.conf.tsauth ?? string.Empty)}:{hash}";
         if (hybridCache.TryGetValue(memKey, out string cached))
             return ContentTo(cached);
 
         try
         {
-            using var http = new System.Net.Http.HttpClient() { Timeout = TimeSpan.FromSeconds(12) };
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
+            deadline.CancelAfter(TimeSpan.FromSeconds(12));
+            using var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, ModInit.conf.tsstat.TrimEnd('/') + "/torrents");
+            request.Content = new System.Net.Http.StringContent(System.Text.Json.JsonSerializer.Serialize(new { action = "get", hash }), Encoding.UTF8, "application/json");
             if (!string.IsNullOrWhiteSpace(ModInit.conf.tsauth))
-                http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(ModInit.conf.tsauth)));
-
-            string url = $"{ModInit.conf.tsstat.TrimEnd('/')}/stream/stat.mkv?link={hash}&index=1&stat";
-            string json = await http.GetStringAsync(url);
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(ModInit.conf.tsauth)));
+            using var response = await statHttp.SendAsync(request, deadline.Token);
+            response.EnsureSuccessStatusCode();
+            string json = await response.Content.ReadAsStringAsync(deadline.Token);
 
             using var doc = System.Text.Json.JsonDocument.Parse(json);
             var r = doc.RootElement;
@@ -224,11 +253,13 @@ public class TracksController : BaseController
                 speed = (long)(r.TryGetProperty("download_speed", out var sp) && sp.ValueKind == System.Text.Json.JsonValueKind.Number ? sp.GetDouble() : 0)
             });
 
-            hybridCache.Set(memKey, outPut, DateTime.Now.AddSeconds(20), inmemory: true);
+            hybridCache.Set(memKey, outPut, DateTime.Now.AddSeconds(10), inmemory: true);
             return ContentTo(outPut);
         }
         catch
         {
+            if (!HttpContext.RequestAborted.IsCancellationRequested)
+                hybridCache.Set(memKey, "{}", DateTime.Now.AddSeconds(2), inmemory: true);
             return ContentTo("{}");
         }
     }

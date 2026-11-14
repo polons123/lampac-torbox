@@ -1,5 +1,25 @@
 # Local changes
 
+## Media reliability follow-up
+
+- Bound ffprobe execution and queue time with a shared deadline; drain stdout and
+  stderr concurrently, kill timed-out process trees, and retain 64 permanent lock
+  stripes instead of racing semaphore removal.
+- Read swarm status with TorrServer's read-only torrent-get operation. Include
+  serial URLs and update only the active web player's statistics, cancelling on close.
+- Add structured PidTor resolution/HDR/voice/tracker metadata for HTML and native
+  menus; support 480p/1440p and literal punctuation, restore the upstream selezen
+  exclusion, and label list seed/peer counts as JacRed snapshots.
+- Replace the duplicate Infuse implementation with a small compatibility loader.
+- Allow existing sync metadata/work paths in private configuration; optional sync
+  scripts remain outside the application overlay.
+- Retain both Rutube categories 4 (Movies) and 13 (Other) by explicit operator
+  choice; retain null-category protection.
+
+Browser JS statistics/filters do not extend the native tvOS interface. Direct MP4
+bitrate remains unavailable unless reliable metadata is supplied. AdminPanel,
+Telemetry and Tracks remain enabled; this follow-up does not change their exposure.
+
 ## TorBox integration removed in custom-v1.90.0-1-local
 
 Removed the custom TorBox module, online balancer, browser library and playback hooks. Native clients use their built-in TorBox connection. Lampac 1.90.0, TimeCode 4, native authentication and unrelated provider changes remain.

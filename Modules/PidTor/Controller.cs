@@ -28,6 +28,27 @@ public class PiTor : BaseOnlineController
     // local patch: tracker names for the second line of the list and the client-side tracker filter
     static string trackerName(Torrent t) => string.Join("+", (t.torrent?.Tracker ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(i => i.ToLower()).Distinct());
 
+    static string Resolution(string name)
+    {
+        string res = Regex.Match(name ?? "", @"(?i)\b(480|720|1080|1440|2160)p\b").Value.ToLowerInvariant();
+        return res.Length > 0 ? res : Regex.IsMatch(name ?? "", @"(?i)\b(4k|uhd)\b") ? "2160p" : "";
+    }
+    static object ReleaseInfo(Torrent torrent, string hash) => new
+    {
+        hash,
+        index = 1,
+        res = torrent.quality,
+        hdr = Regex.IsMatch(torrent.name, @"(?i)\b(DV|Dovi)\b|Dolby[ ._-]*Vision") ? "Dolby Vision" :
+            Regex.IsMatch(torrent.name, @"(?i)HDR10\+") ? "HDR10+" :
+            Regex.IsMatch(torrent.name, @"(?i)HDR10") ? "HDR10" : Regex.IsMatch(torrent.name, @"(?i)\bHDR\b") ? "HDR" : "SDR",
+        voices = torrent.torrent?.info?.voices?.Where(v => !string.IsNullOrWhiteSpace(v)).ToArray() is { Length: > 0 } voices
+            ? voices : string.IsNullOrWhiteSpace(torrent.voice) ? Array.Empty<string>() : new[] { torrent.voice },
+        trackers = (torrent.torrent?.Tracker ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+        seeders = torrent.sid,
+        peers = torrent.torrent?.Peers ?? 0,
+        source = "JacRed"
+    };
+
     [HttpGet, Staticache(manually: true)]
     [Route("lite/pidtor")]
     async public Task<ActionResult> Index(string title, string original_title, short year, string original_language, byte serial, short s = -1, bool rjson = false)
@@ -42,7 +63,7 @@ public class PiTor : BaseOnlineController
         if (init.workinghours != null && !init.workinghours.Contains(DateTime.UtcNow.Hour))
             return Json(new { accsdb = true, msg = "Временно недоступен, попробуйте через несколько часов" });
 
-        var cache = await InvokeCacheResult<List<Torrent>>($"pidtor:{title}:{original_title}:{year}:{original_language}:{serial}", 40, textJson: true, onget: async e =>
+        var cache = await InvokeCacheResult<List<Torrent>>($"pidtor:v2:{title}:{original_title}:{year}:{original_language}:{serial}", 40, textJson: true, onget: async e =>
         {
             string uri = $"{init.redapi}/api/v2.0/indexers/all/results?title={HttpUtility.UrlEncode(title)}&title_original={HttpUtility.UrlEncode(original_title)}&year={year}&is_serial={(original_language == "ja" ? 5 : (serial + 1))}&apikey={init.apikey}";
 
@@ -62,6 +83,8 @@ public class PiTor : BaseOnlineController
                     continue;
 
                 string tracker = torrent.Tracker;
+                if (string.Equals(tracker, "selezen", StringComparison.OrdinalIgnoreCase))
+                    continue;
                 if (init.max_serial_size > 0 && init.max_size > 0)
                 {
                     if (serial == 1)
@@ -81,7 +104,7 @@ public class PiTor : BaseOnlineController
                         continue;
                 }
 
-                if (init.forceAll || Regex.IsMatch(name.ToLower(), "(4k|uhd)( |\\]|,|$)") || name.Contains("2160p") || name.Contains("1080p") || name.Contains("720p"))
+                if (init.forceAll || Regex.IsMatch(name, @"(?i)(\b(?:480|720|1080|1440|2160)p\b|\b4k\b|\buhd\b)"))
                 {
                     int sid = torrent.Seeders;
                     long? size = torrent.Size;
@@ -262,7 +285,7 @@ public class PiTor : BaseOnlineController
                         if (!string.IsNullOrEmpty(init.filter_ignore) && Regex.IsMatch($"{name}:{voicename}", init.filter_ignore, RegexOptions.IgnoreCase))
                             continue;
 
-                        torrents.Add(new(name, voicename, magnet, sid, tr, (name.Contains("2160p") ? "2160p" : name.Contains("1080p") ? "1080p" : "720p"), (torrent.Size ?? 0), mediainfo, torrent));
+                        torrents.Add(new(name, voicename, magnet, sid, tr, Resolution(name), (torrent.Size ?? 0), mediainfo, torrent));
                     }
                 }
             }
@@ -295,7 +318,7 @@ public class PiTor : BaseOnlineController
                 {
                     var seasons = new HashSet<short>();
 
-                    var tpl = new SeasonTpl(quality: torrents.FirstOrDefault(i => Regex.IsMatch(i.name, "(4k|uhd)( |\\]|,|$)", RegexOptions.IgnoreCase) || i.name.Contains("2160p"))?.name != null ? "2160p" : torrents.FirstOrDefault(i => i.name.Contains("1080p"))?.name != null ? "1080p" : "720p");
+                    var tpl = new SeasonTpl(quality: torrents.OrderByDescending(t => int.TryParse(t.quality.Replace("p", ""), out int q) ? q : 0).FirstOrDefault()?.quality);
 
                     foreach (var t in torrents)
                     {
@@ -320,6 +343,7 @@ public class PiTor : BaseOnlineController
                 else
                 {
                     var stpl = new SimilarTpl();
+                    var metadata = new List<object>();
 
                     foreach (var torrent in torrents)
                     {
@@ -333,20 +357,23 @@ public class PiTor : BaseOnlineController
                         if (string.IsNullOrWhiteSpace(hashmagnet))
                             continue;
 
+                        int before = stpl.Length;
                         stpl.Append(
                             torrent.voice,
                             null,
-                            $"{torrent.quality} / {torrent.mediainfo} / {trackerName(torrent)} / S {torrent.sid} / P {torrent.torrent?.Peers ?? 0}",
+                            $"{torrent.quality} / {torrent.mediainfo} / {trackerName(torrent)} / S {torrent.sid} / P {torrent.torrent?.Peers ?? 0} (JacRed)",
                             accsArgs($"{host}/lite/pidtor/serial/{hashmagnet}?{torrent.tr}&rjson={rjson}&title={en_title}&original_title={en_original_title}&s={s}")
                         );
+                        if (stpl.Length > before) metadata.Add(ReleaseInfo(torrent, hashmagnet));
                     }
 
-                    return stpl;
+                    return new ReleaseTpl(stpl, metadata);
                 }
             }
             else
             {
                 var mtpl = new MovieTpl(title, original_title);
+                var metadata = new List<object>();
 
                 foreach (var torrent in torrents)
                 {
@@ -354,16 +381,18 @@ public class PiTor : BaseOnlineController
                     if (string.IsNullOrWhiteSpace(hashmagnet))
                         continue;
 
+                    int before = mtpl.Length;
                     mtpl.Append(
                         torrent.voice,
                         accsArgs($"{host}/lite/pidtor/s{hashmagnet}?{torrent.tr}") + (ModInit.conf.gst ? "&.m3u8" : ""),
-                        voice_name: $"{torrent.quality} / {torrent.mediainfo} / {trackerName(torrent)} / S {torrent.sid} / P {torrent.torrent?.Peers ?? 0}",
+                        voice_name: $"{torrent.quality} / {torrent.mediainfo} / {trackerName(torrent)} / S {torrent.sid} / P {torrent.torrent?.Peers ?? 0} (JacRed)",
                         quality: torrent.quality.Replace("p", ""),
                         hls_manifest_timeout: (int)TimeSpan.FromSeconds(60).TotalMilliseconds
                     );
+                    if (mtpl.Length > before) metadata.Add(ReleaseInfo(torrent, hashmagnet));
                 }
 
-                return mtpl;
+                return new ReleaseTpl(mtpl, metadata);
             }
         });
     }
@@ -452,6 +481,7 @@ public class PiTor : BaseOnlineController
         return ContentTpl(cache, () =>
         {
             var mtpl = new EpisodeTpl();
+            var metadata = new List<object>();
 
             foreach (var torrent in cache.Value)
             {
@@ -466,9 +496,10 @@ public class PiTor : BaseOnlineController
                     accsArgs($"{host}/lite/pidtor/s{id}?{tr}&tsid={torrent.id}") + (ModInit.conf.gst ? "&.m3u8" : ""),
                     hls_manifest_timeout: (int)TimeSpan.FromSeconds(60).TotalMilliseconds
                 );
+                metadata.Add(new { hash = id, index = torrent.id });
             }
 
-            return mtpl;
+            return new ReleaseTpl(mtpl, metadata);
         });
     }
 

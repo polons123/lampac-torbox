@@ -77,3 +77,19 @@ accounts. It does not deploy, push commits, create tags or publish releases.
 See [the 1.90.0 upgrade notes](UPGRADE-1.90.0.md) for TimeCode migration,
 Apple TV account binding and rollback requirements. Custom tags are excluded
 from the upstream Build workflow to protect the assembled custom ZIP.
+
+## Media components
+
+Tracks bounds ffprobe waiting/execution to 30 seconds by default (operator setting
+`Tracks.ffprobe_timeout_seconds`, clamped to 1–120). Successful probes are cached;
+only quick empty results retry. A fixed set of 64 lock stripes avoids unbounded
+per-URL synchronization state. Swarm status reads existing torrents only, with a
+10-second cache. Web playback polls every 10 seconds while active.
+
+PidTor supplies structured metadata alongside its standard HTML/native menu. Web
+filters use these fields, not title parsing. List peer counts are JacRed snapshots;
+player statistics are separate. `selezen` retains the upstream exclusion.
+`infuseSave.js` is the sole Infuse implementation; `/its/its.js` only loads it for
+older clients. Rutube accepts categories 4 and 13 by operator choice. AdminPanel,
+Telemetry and Tracks are enabled in this custom package. Player metrics obtain
+bitrate from HLS; unknown direct-file bitrate is displayed as unavailable.

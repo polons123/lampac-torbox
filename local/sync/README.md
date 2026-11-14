@@ -73,3 +73,14 @@ still differ. The custom 1.90.0 package includes capability 4 when the TimeCode 
 enabled. Older Core installations still require a separate upgrade; installing
 these scripts alone does not enable it. Offline timestamp, deletion and fallback checks live
 in [../tests](../tests/README.md).
+
+## Aligning an existing cron installation
+
+The runtime scripts and these examples should use the same source revision.
+Keep host settings in private JSON rather than editing Python constants.
+`meta_file` and `work_dir` optionally preserve existing peer state/work locations;
+`full_reconcile_role`, `rclone_remote`, `database_dir`, role and accounts paths
+must retain the operator's existing values. Plex `state_file` must retain its
+existing state path. Back up both scripts, settings and state, hold their cron
+locks while replacing files, then compare effective settings and use dry-runs
+before allowing scheduled writes. Deployment never copies these optional files.

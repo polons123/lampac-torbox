@@ -746,7 +746,8 @@
         season: file.season,
         episode: file.episode,
         voice_name: file.voice_name,
-        thumbnail: file.thumbnail
+        thumbnail: file.thumbnail,
+        pidtor: file.pidtor
       };
       return play;
     };
@@ -1268,14 +1269,14 @@
     var pf_all = [], pf_params = {}, pf_kind = '', pf_fi = null;
     var PF_KEYS = ['res', 'hdr', 'voice', 'tr'];
     var PF_TITLE = { res: 'Разрешение', hdr: 'HDR', voice: 'Озвучка', tr: 'Трекер' };
-    var PF_ORDER = { res: ['2160p', '1080p', '720p'], hdr: ['Dolby Vision', 'HDR10', 'HDR', 'SDR'] };
+    var PF_ORDER = { res: ['2160p', '1440p', '1080p', '720p', '480p'], hdr: ['Dolby Vision', 'HDR10+', 'HDR10', 'HDR', 'SDR'] };
     var pfParse = function (el) {
-      var blob = Object.keys(el).map(function (k) { return typeof el[k] === 'string' ? el[k] : ''; }).join(' | ');
-      var res = (blob.match(/\b(2160p|1080p|720p)\b/) || [])[1] || '';
-      var hdr = /Dolby Vision/i.test(blob) ? 'Dolby Vision' : /HDR10/.test(blob) ? 'HDR10' : /\bHDR\b/.test(blob) ? 'HDR' : /\bSDR\b/.test(blob) ? 'SDR' : '';
-      var voice = String(el.translate || el.text || el.title || '').split(/\s*[,+]\s*/).filter(Boolean);
-      var tr = ((/ \/ ([^\s\/|]+) \/ S \d+ \/ P \d+/.exec(blob) || [])[1] || '').split('+').filter(Boolean);
-      return { res: res, hdr: hdr, voice: voice, tr: tr };
+      var meta = el.pidtor || {};
+      // Old cached responses use only their designated quality field, never card titles/URLs.
+      var res = meta.res || (/^(480|720|1080|1440|2160)p?$/.test(String(el.maxquality || '')) ? String(el.maxquality).replace(/p$/, '') + 'p' : '');
+      return { res: res, hdr: meta.hdr || '',
+        voice: Array.isArray(meta.voices) ? meta.voices : [],
+        tr: Array.isArray(meta.trackers) ? meta.trackers : [] };
     };
     var pfApply = function (list) {
       var c = pf_self.getChoice();
@@ -1291,7 +1292,7 @@
       return list.map(function (el) { return Object.assign({}, el); });
     };
     var pfSplit = function (s) {
-      var m = /^(.*) \/ (\S+ \/ S \d+ \/ P \d+)$/.exec(s || '');
+      var m = /^(.*) \/ (\S+ \/ S \d+ \/ P \d+(?: \(JacRed\))?)$/.exec(s || '');
       return m ? { head: m[1], tail: m[2] } : null;
     };
     var pfCounts = function (k) {

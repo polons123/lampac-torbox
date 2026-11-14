@@ -3,6 +3,7 @@
   "dynamic": true,
   "tree": [
     "Controller.cs",
+    "ReleaseTpl.cs",
     "Model.cs",
     "ModInit.cs"
   ]

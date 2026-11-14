@@ -23,3 +23,15 @@ temporary directories and fake systemctl/installer commands. It covers repeat
 migration, malformed configuration before downtime, installer/overlay/atomic
 write/backup/post-start verification failures, retained backups and restoration
 of a previously active or inactive service. No production services are called.
+
+Media regression (isolated public runtime; fake ffprobe/TorrServer/JacRed):
+
+```sh
+python3 local/tests/media_http.py --runtime /path/to/extracted/public-release
+node local/tests/media_ui.cjs
+```
+
+It verifies probe deadlines/process-tree termination, concurrent identical
+probes, stderr draining, read-only swarm status and structured PidTor metadata.
+JS filters/statistics apply to the web client; native device rendering remains
+a separate manual check.
