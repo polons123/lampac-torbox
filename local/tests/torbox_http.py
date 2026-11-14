@@ -404,6 +404,35 @@ try:
     for mode in ["entry-failed", "entry-error"]:
         code, payload, calls = links(mode)
         check("per-file " + mode + " rejects whole batch without fallback", code == 502 and [c[0] for c in calls] == ["post-batch"])
+
+    items.clear()
+    items[10] = torrent(A, 10, [1, 2])
+    rows[:] = [row(A)]
+    state["metadata_mode"] = "normal"
+    reset()
+    root_path = "/lite/torbox?title=Mock%20Show&original_title=Mock%20Show&year=2020"
+    for serial, label in [(0, "movie"), (1, "series")]:
+        code, native = api(root_path + "&serial=" + str(serial) + "&rjson=true")
+        check("native " + label + " search returns standard JSON rows", code == 200 and native.get("type") == "similar" and bool(native.get("data")))
+        depth = 0
+        while native.get("type") == "similar":
+            entries = native["data"]
+            check("native " + label + " navigation retains JSON format at level " + str(depth), bool(entries) and all("rjson=true" in e["url"] for e in entries))
+            chosen = next((e for e in entries if "&sub=-1" in e["url"]), None)
+            chosen = chosen or next((e for e in entries if "&audio=0" in e["url"]), None)
+            chosen = chosen or next((e for e in entries if "&resolution=0" in e["url"]), None)
+            chosen = chosen or entries[0]
+            url = urllib.parse.urlsplit(chosen["url"])
+            code, native = api(url.path + "?" + url.query)
+            depth += 1
+            assert code == 200 and depth < 12, (code, depth)
+        check("native " + label + " reaches standard call item", native.get("type") == "movie" and native["data"][0]["method"] == "call")
+        url = urllib.parse.urlsplit(native["data"][0]["url"])
+        code, video = api(url.path + "?" + url.query)
+        check("native " + label + " resolves a standard playable video", code == 200 and video.get("method") == "play" and video["url"].startswith("https://"))
+    for suffix, label in [("", "default"), ("&rjson=false", "explicit HTML"), ("&rjson=true&nojson=true", "web nojson override")]:
+        code, html = get(root_path + suffix)
+        check("legacy " + label + " retains browser metadata and HTML", code == 200 and "data-json='" in html and "torbox_voice_options" in html)
     print("PASS: %d TorBox HTTP assertions" % len(checks), flush=True)
 
 finally:

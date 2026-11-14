@@ -54,7 +54,12 @@ public partial class TorBoxController
         }
     }
 
+    // The web adapter requests nojson; native clients request the standard Lampac JSON templates.
+    bool OnlineJson => !Request.Query.ContainsKey("nojson") && bool.TryParse(Request.Query["rjson"],out bool json) && json;
+    ActionResult JsonMenu(ITplResult template) => Content(template.ToJson(),"application/json; charset=utf-8");
+    ActionResult JsonStream(string url,string title) => Content(VideoTpl.ToJson("play",url,title,hls_manifest_timeout:60000),"application/json; charset=utf-8");
     ActionResult Similar(SimilarTpl t, params (int Season,int Episode)[] frames) {
+        if(OnlineJson)return JsonMenu(t);
         string html=t.ToHtml();
         if(frames.Length>0){
             int index=0;
@@ -65,7 +70,7 @@ public partial class TorBoxController
         }
         return Content(html,"text/html; charset=utf-8");
     }
-    string OnlineUrl(string path) => host + "/lite/torbox/" + path;
+    string OnlineUrl(string path) => host + "/lite/torbox/" + path + (OnlineJson ? (path.Contains('?')?"&":"?")+"rjson=true" : "");
     Pick GetPick(string ticket) {
         lock(pickCacheGate) {
         if (ticket == null || !picks.TryGetValue(ticket,out var p) || p.Expires < DateTime.UtcNow || p.Owner != metadataOwner)
@@ -168,6 +173,7 @@ public partial class TorBoxController
         selected=voices.FirstOrDefault(v=>string.Equals(v,selected,StringComparison.OrdinalIgnoreCase))??selected;
         string search=host+"/lite/torbox?title="+Uri.EscapeDataString(title??"")+"&original_title="+Uri.EscapeDataString(original_title??"")+"&year="+year+"&serial="+serial+"&id="+id+"&tmdb_id="+tmdb_id+"&source="+Uri.EscapeDataString(source??"")+"&tb_season="+tb_season+"&tb_episode="+tb_episode;
         foreach(var field in filters.Properties())search+="&tb_"+field.Name+"="+Uri.EscapeDataString((string)field.Value);
+        if(OnlineJson)search+="&rjson=true";
         var matching=releases.Where(t=>(selected.Length==0 || ReleaseVoices(t).Contains(selected,StringComparer.OrdinalIgnoreCase)) &&
             filters.Properties().All(f=>string.IsNullOrEmpty((string)f.Value) || ReleaseTrait(t,f.Name)==(string)f.Value)).ToArray();
         var states=await ReleaseCacheStates(key,matching);
@@ -191,6 +197,7 @@ public partial class TorBoxController
         var seasons=releases.Select(t=>SeasonHint((string)t["Title"])).Where(s=>s>0).Distinct().OrderBy(s=>s).ToArray();
         if(candidates.Length==0) {
             var empty=new SimilarTpl();empty.Append("По выбранным фильтрам раздач нет. Измените фильтры или выберите «Все».",null,null,search);
+            if(OnlineJson)return JsonMenu(empty);
             return Content(SimilarReleaseHtml(empty,voices,selected,search,true,tb_season,tb_episode,seasons,options,filters),"text/html; charset=utf-8");
         }
         lock(pickCacheGate) {
@@ -220,6 +227,7 @@ public partial class TorBoxController
             tpl.Append(p.Name,year.ToString(),ReleaseSummary(t)+" · Озвучка: "+ReleaseVoices(t)[0]+(ReleaseVoices(t).Length>1 ? " + "+(ReleaseVoices(t).Length-1) : ""),OnlineUrl("choose?pick="+ticket));
         }
         if(serial==1){var peers=seriesPicks.ToArray();foreach(var p in peers)p.SeriesPicks=peers;}
+        if(OnlineJson)return JsonMenu(tpl);
         return Content(SimilarReleaseHtml(tpl,voices,selected,search,false,tb_season,tb_episode,seasons,options,filters),"text/html; charset=utf-8");
         }
     });
@@ -506,6 +514,7 @@ public partial class TorBoxController
         if(files.Length==0)return Error(404,"В раздаче нет видеофайлов");
         string preferenceNotice=null;
         ActionResult Menu(SimilarTpl menu,params (int Season,int Episode)[] frames) {
+            if(OnlineJson)return JsonMenu(menu);
             var result=(ContentResult)Similar(menu,frames);
             result.Content=ChosenHtml(result.Content,p,requested,files.FirstOrDefault(f=>(long?)f["id"]==file) is JToken selectedFile?FileName(selectedFile):null,preferenceNotice);
             return result;
@@ -575,6 +584,7 @@ public partial class TorBoxController
         var movie=new MovieTpl(p.Movie,p.Movie);
         string selection=(resolution==0?"Исходное разрешение":resolution+"p")+" · "+(audios.Count>audio?TrackLabel(audios[audio]):"Звук по умолчанию")+" · "+(sub<0?"Без субтитров":TrackLabel(subtitles[sub]));
         movie.Append(string.IsNullOrWhiteSpace(p.Movie)?p.Name:p.Movie,OnlineUrl("play?pick="+pick+"&file="+file+"&resolution="+resolution+"&audio="+audio+"&sub="+sub),method:"call",voice_name:selection+" · Раздача: "+p.Name,hls_manifest_timeout:60000);
+        if(OnlineJson)return JsonMenu(movie);
         return Content(ChosenHtml(movie.ToHtml(),p,requested,FileName(files.First(f=>(long?)f["id"]==file)),preference:PlaybackPreference(data,resolution,audio,sub)),"text/html; charset=utf-8");
     });
     static bool CachedReady(JToken t) =>
@@ -678,6 +688,7 @@ public partial class TorBoxController
         var data=await StreamData(key,p.Id.Value,file,audio,sub,resolution==0?null:ResolutionIndex(resolution));
         string url=(string)data["hls_url"];
         if(!Uri.TryCreate(url,UriKind.Absolute,out var uri)||uri.Scheme!="https")return Error(502,"TorBox не вернул HLS-поток");
+        if(OnlineJson)return JsonStream(url,p.Movie??p.Name);
         // One TorBox-issued URL for the exact preselected combination, for either player.
         // Empty quality map prevents client defaults from overriding the selected resolution.
         // No runtime TorBox descriptor: selections are made before playback.

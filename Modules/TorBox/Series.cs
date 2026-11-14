@@ -170,6 +170,7 @@ public partial class TorBoxController
         else SaveSeriesPosition(state,index);
         string followNotice=state.FollowId==null && state.Episodes[index].Pick.SourceKey!=null
             ? (state.FollowNotice??"Не удалось сохранить сезон для проверки обновлений") : null;
+        if(OnlineJson)return JsonStream(stream.Url,state.Title+" · "+EpisodeTitle(state.Episodes[index]));
         return Payload(new{success=true,torbox_stream=true,url=stream.Url,quality=new JObject(),hls_manifest_timeout=60000,
             torbox_series=SeriesInfo(session,state,index,version),selection_notice=stream.Notice??followNotice});
     }

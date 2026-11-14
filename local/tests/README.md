@@ -29,6 +29,8 @@ Use `--dotnet /path/to/dotnet` when it is outside PATH. Use `--module-dir
 The checks cover variant continuation, ambiguity stops, ownership, lazy file
 loading, active paging, batch order/schema, unsupported-endpoint fallback and
 failures that must not fall back. Requests use temporary loopback ports only.
+They also walk complete native `rjson=true` movie/series menus to the final
+video response and verify default/explicit/nojson HTML compatibility.
 The JS harness checks the library UI's lazy-loading/filter request behavior.
 
 GitHub Actions runs the same checks and downloads the public runtime without
