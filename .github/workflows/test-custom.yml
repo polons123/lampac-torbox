@@ -35,6 +35,8 @@ jobs:
           node local/tests/media_ui.cjs
           bash -n local/build-release.sh local/deploy-host.sh
           git diff --check
+      - name: Deployment directory access as an unprivileged service user
+        run: sudo python3 -m unittest local.test_deploy.DeployPermissionTests
       - name: Download public runtime
         env:
           GH_TOKEN: ${{ github.token }}

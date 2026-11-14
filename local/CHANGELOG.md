@@ -4,6 +4,18 @@ Restored TorBox balancer, browser playback, My TorBox and settings from the Nove
 
 # Local changes
 
+## Deployment review follow-up
+
+- Budget free space before download, extraction and downtime, including the
+  full snapshot, installer staging, application growth and a 512 MiB reserve.
+  Cap the archive download; never delete backups to make room automatically.
+- Verify directory access as the service user and repair only manifest-managed
+  code directories. Preserve accessible private modes and reject inaccessible
+  installation roots or symlinked code directories before downtime.
+- Cover real unprivileged traversal and low-space failures; remove the unused
+  migration marker and empty migration/apply plumbing. TorBox data is retained.
+- Keep `rjson` accepted for compatibility and document its browser HTML response.
+
 ## Media reliability follow-up
 
 - Bound ffprobe execution and queue time with a shared deadline; drain stdout and

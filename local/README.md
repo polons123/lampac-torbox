@@ -33,6 +33,20 @@ the original failure status is preserved and the backup remains available. An
 initially inactive service is left inactive. Uncatchable termination or power loss
 requires manual recovery from the retained backup.
 
+Before downloading, extracting and stopping the service, the deployer budgets
+space per filesystem for the full snapshot, extracted candidate, the installer's
+second download/extraction and application growth, with 512 MiB reserved for
+runtime writes. The ZIP download is capped by the remaining budget. Insufficient
+space aborts before downtime; existing backups are never deleted automatically.
+This conservative estimate does not reserve disk blocks against concurrent writers.
+
+The service identity defaults to `lampac` (`LAMPAC_SERVICE_USER` overrides it and
+must match the service unit). Directory access is checked as that user. Only
+manifest-managed code directories are created or repaired inside the snapshot;
+an accessible private directory keeps its mode. The installation root and
+unrelated private directories are not relaxed. Inaccessible roots and symlinked
+overlay directories require operator review before downtime.
+
 `/root/lampac_postupdate_check.py --local check` checks the installed code against
 that manifest independently of data-only excludes.conf. After a reviewed deployment
 and functional checks, run `--local snapshot` to migrate/refresh the baseline.

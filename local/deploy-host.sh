@@ -6,6 +6,8 @@ umask 077
 REPO=${LAMPAC_GITHUB_REPO:-polons123/lampac-torbox}
 TAG=${1:?usage: deploy-host.sh <release tag>}
 ROOT=${LAMPAC_ROOT:-/opt/lampac}
+SERVICE_USER=${LAMPAC_SERVICE_USER:-lampac}
+SERVICE_GROUP=$(id -gn "$SERVICE_USER")
 INSTALLER=${LAMPAC_INSTALLER:-/root/lampac_install.sh}
 STATE=${LAMPAC_RELEASE_STATE:-/root/lampac-release-state}
 ASSET_URL="https://github.com/${REPO}/releases/download/${TAG}"
@@ -44,10 +46,11 @@ trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+download_limit=$(python3 "$HELPER" space "$BACKUP_ROOT" "$work" "$ROOT" "$STATE" "$CHECKER" "$DROPIN")
 echo '>> Downloading and verifying release before installation'
-curl -fsSL --retry 3 -o "$work/app.zip" "${ASSET_URL}/lampac-nextgen.zip"
 curl -fsSL --retry 3 -o "$work/overlay.sha256" "${ASSET_URL}/overlay.sha256"
 curl -fsSL --retry 3 -o "$work/build-info.txt" "${ASSET_URL}/build-info.txt"
+curl -fsSL --retry 3 --max-filesize "$download_limit" -o "$work/app.zip" "${ASSET_URL}/lampac-nextgen.zip"
 python3 - "$work" <<'PY'
 import hashlib,pathlib,re,sys,zipfile
 work=pathlib.Path(sys.argv[1]);info=dict(line.split('=',1) for line in (work/'build-info.txt').read_text().splitlines())
@@ -64,13 +67,17 @@ with zipfile.ZipFile(work/'app.zip') as z:
  names=z.namelist();assert len(names)==len(set(names)),'duplicate archive entries'
  assert all(not n.startswith('/') and '..' not in pathlib.PurePosixPath(n).parts for n in names),'unsafe archive path'
  assert 'Core.dll' in names,'missing Core.dll'
- z.extractall(work/'app')
+PY
+python3 "$HELPER" space "$BACKUP_ROOT" "$work" "$ROOT" "$STATE" "$CHECKER" "$DROPIN" > /dev/null
+python3 - "$work" <<'PY'
+import pathlib,sys,zipfile
+work=pathlib.Path(sys.argv[1])
+with zipfile.ZipFile(work/'app.zip') as z:z.extractall(work/'app')
 PY
 (cd "$work/app" && sha256sum --strict -c "$work/overlay.sha256")
 
 # Validate and prepare configuration before any host writes or downtime.
-marker="$STATE/migrations/reserved"
-python3 "$HELPER" prepare "$ROOT" "$work" "$marker"
+python3 "$HELPER" prepare "$ROOT" "$work" "$SERVICE_USER"
 # Coordinate with the two optional sync tools while copying/restoring SQLite files.
 exec 8> "${LAMPAC_LOCK_DIR:-/tmp}/lampac_sync.lock"
 exec 9> "${LAMPAC_LOCK_DIR:-/tmp}/plex_lampac_sync.lock"
@@ -79,6 +86,7 @@ flock -w 60 9
 mkdir -p "$BACKUP_ROOT"
 chmod 0700 "$BACKUP_ROOT"
 backup=$(mktemp -d "$BACKUP_ROOT/deploy.XXXXXXXX")
+python3 "$HELPER" space "$BACKUP_ROOT" "$work" "$ROOT" "$STATE" "$CHECKER" "$DROPIN" > /dev/null
 touched_service=1
 systemctl stop lampac
 python3 "$HELPER" snapshot "$backup" "$ROOT" "$STATE" "$CHECKER" "$DROPIN"
@@ -92,17 +100,16 @@ systemctl daemon-reload
 LAMPAC_GITHUB_REPO="$REPO" bash "$INSTALLER" --update --tag "$TAG" --force < /dev/null
 # The upstream installer may have started the service.
 systemctl stop lampac
+python3 "$HELPER" directories "$ROOT" "$work" "$SERVICE_USER"
 while read -r hash path; do
   src="$work/app/$path"
   dst="$ROOT/$path"
   if [ -f "$dst" ] && [ "$(sha256sum "$dst" | cut -d' ' -f1)" = "$hash" ]; then continue; fi
-  install -d -m 0755 "$(dirname "$dst")"
-  install -o lampac -g lampac -m 0644 "$src" "$dst"
+  install -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0644 "$src" "$dst"
   echo "   + $path"
 done < "$work/overlay.sha256"
 (cd "$ROOT" && sha256sum --strict -c "$work/overlay.sha256")
 [ "$(cat "$ROOT/version.txt")" = "$TAG" ] || { echo 'Installed version mismatch' >&2; exit 1; }
-python3 "$HELPER" apply "$ROOT" "$work"
 
 mkdir -p "$STATE"
 chmod 0700 "$STATE"
