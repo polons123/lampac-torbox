@@ -34,6 +34,7 @@ map_path() {
     local/deploy-host.sh|local/deploy-state.py) printf 'release-tools/%s\n' "${1#local/}" ;;
     local/lampac-postupdate-check.py) printf 'release-tools/lampac-postupdate-check.py\n' ;;
     local/wwwroot/*)  printf 'wwwroot/%s\n'   "${1#local/wwwroot/}" ;;
+    Modules/TorBox/*) printf 'mods/TorBox/%s\n' "${1#Modules/TorBox/}" ;;
     Modules/*)        printf 'module/%s\n'    "${1#Modules/}" ;;
     Online/*)         printf 'module/Online/%s\n' "${1#Online/}" ;;
     .gitignore|local/*) return 1 ;;

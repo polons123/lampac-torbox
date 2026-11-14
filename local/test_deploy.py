@@ -137,13 +137,11 @@ class DeployTests(unittest.TestCase):
         result = self.deploy()
         self.assertEqual(result.returncode, 0, result.stderr)
         config = json.loads((self.root / 'init.conf').read_text())
-        self.assertNotIn('TorBox', config)
-        self.assertEqual(config['LampaWeb']['customPlugins'], self.old['LampaWeb']['customPlugins'][1:])
-        self.assertEqual((self.root / 'excludes.conf').read_text(), '# torbox is mentioned in a comment\nusers.json\ncustom-torbox.json\n')
-        self.assertFalse((self.root / 'mods/TorBox').exists())
-        self.assertFalse((self.root / 'cache/static/old.js').exists())
-        self.assertTrue((self.root / 'cache/static/innocent.js').exists())
-        self.assertTrue((self.root / 'cache/media.js').exists())
+        self.assertEqual(config, self.old)
+        for name in ['init.conf', 'excludes.conf', 'torbox-private.json',
+                     'mods/TorBox/manifest.json', 'database/torbox-library.json',
+                     'database/torbox-series.json', 'cache/static/old.js']:
+            self.assertEqual((self.root / name).read_bytes(), self.before['app/' + name])
         self.assertEqual((self.root / 'users.json').read_text(), 'old tokens')
         before = {n: (self.root / n).stat().st_mtime_ns for n in ['init.conf', 'excludes.conf']}
         # A repeated migration must not even read matching script cache entries.
@@ -168,7 +166,7 @@ class DeployTests(unittest.TestCase):
         self.assertNotIn('stop lampac', (self.base / 'commands').read_text())
 
     def test_failure_restores_files_and_service(self):
-        for failure, status in [('installer', 42), ('overlay', 73), ('write', 1), ('verify', 1), ('snapshot', 1)]:
+        for failure, status in [('installer', 42), ('overlay', 73), ('verify', 1), ('snapshot', 1)]:
             with self.subTest(failure=failure):
                 result = self.deploy(failure)
                 self.assertEqual(result.returncode, status, result.stderr)

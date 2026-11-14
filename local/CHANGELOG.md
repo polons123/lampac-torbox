@@ -1,3 +1,7 @@
+# Correction — restore existing TorBox integration
+
+Restored TorBox balancer, browser playback, My TorBox and settings from the November 13 sources. Removed only November 14 TorBox native Apple TV experiments. Deployment preserves TorBox configuration and library data. Current Lampac 1.90, TimeCode 4, authentication and media fixes remain.
+
 # Local changes
 
 ## Media reliability follow-up
@@ -20,9 +24,9 @@ Browser JS statistics/filters do not extend the native tvOS interface. Direct MP
 bitrate remains unavailable unless reliable metadata is supplied. AdminPanel,
 Telemetry and Tracks remain enabled; this follow-up does not change their exposure.
 
-## TorBox integration removed in custom-v1.90.0-1-local
+## Superseded: erroneous TorBox removal in custom-v1.90.0-1
 
-Removed the custom TorBox module, online balancer, browser library and playback hooks. Native clients use their built-in TorBox connection. Lampac 1.90.0, TimeCode 4, native authentication and unrelated provider changes remain.
+The removal was broader than requested. The correction above restores the prior web integration; only the native TorBox experiments should have been removed.
 
 ## custom-v1.90.0-1-local — installed locally, not published
 
@@ -36,9 +40,8 @@ Removed the custom TorBox module, online balancer, browser library and playback 
 - Exclude `custom-*` tags from the inherited upstream Build workflow so it cannot
   overwrite the custom ZIP. CI uses the upstream version from `local/base`.
 
-Deployment procedure follow-up: prepare legacy TorBox removal
-before downtime, retain a stopped snapshot and restore it on failure. Migration
-is conditional and records successful completion; later deployments skip its cache scan.
+Deployment retains a stopped snapshot and restores it on failure. The correction
+disables TorBox removal; subsequent deployments preserve its configuration and data.
 
 Physical Apple TV playback and live Plex writes remain device/operator checks.
 

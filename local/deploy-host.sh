@@ -69,7 +69,7 @@ PY
 (cd "$work/app" && sha256sum --strict -c "$work/overlay.sha256")
 
 # Validate and prepare configuration before any host writes or downtime.
-marker="$STATE/migrations/torbox-removal-v1.done"
+marker="$STATE/migrations/reserved"
 python3 "$HELPER" prepare "$ROOT" "$work" "$marker"
 # Coordinate with the two optional sync tools while copying/restoring SQLite files.
 exec 8> "${LAMPAC_LOCK_DIR:-/tmp}/lampac_sync.lock"
@@ -114,8 +114,6 @@ install -m 0700 "$ROOT/release-tools/lampac-postupdate-check.py" "$CHECKER"
 systemctl start lampac
 systemctl is-active --quiet lampac
 [ "$(systemctl show -p UMask --value lampac)" = 0077 ]
-mkdir -p "$(dirname "$marker")"
-: > "$marker"
 if [ "$was_active" -eq 0 ]; then systemctl stop lampac; fi
 complete=1
 echo ">> Installed $TAG; overlay verified; backup: $backup"

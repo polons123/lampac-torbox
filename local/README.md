@@ -23,7 +23,7 @@ all overlay paths (including protected `mods/` and `wwwroot/`), verifies every h
 and retains the manifest and version in `/root/lampac-release-state/`.
 It also sets the Lampac service's UMask to 0077 and tightens existing current.conf
 to 0600. Application files created later are private to the service user by default.
-The deployer validates the legacy TorBox migration before downtime. It then stops
+The deployer validates host configuration before downtime. It then stops
 Lampac and retains a complete application snapshot (including SQLite files), release
 state, checker and systemd drop-in under `${STATE}-backups/deploy.*` (0700).
 It holds the optional peer/Plex sync locks during this operation. Other external
@@ -48,9 +48,7 @@ the baseline only after functional checks. The next full verified release deploy
 removes this ledger. This records runtime differences without rewriting a published
 release or silently accepting arbitrary source drift.
 
-Configuration is host-owned. The one-time legacy TorBox migration described in
-[the upgrade notes](UPGRADE-1.90.0.md) removes only its known settings and data;
-other configuration is retained. In particular, LampaWeb.cssReplace and
+Configuration is host-owned. TorBox settings, plugins and library data are retained. In particular, LampaWeb.cssReplace and
 its served dark notification CSS are checked by the post-update tool. Client and
 account configuration are never copied from another host or published.
 An optional private `/root/lampac-check-hosts.json` supplies the checker fleet roster

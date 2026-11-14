@@ -1,8 +1,9 @@
 # Custom 1.90.0 upgrade notes
 
 This candidate includes the official 1.90.0 Core, NativeAppleTV and TimeCode 4,
-with custom media and client changes. The custom TorBox integration has been
-removed; use the native client connection. A full package upgrade is required.
+with custom media and client changes. The existing TorBox balancer, web library and playback are retained.
+Only the November 14 TorBox native Apple TV experiments are omitted.
+A full package upgrade is required.
 
 ## Before installing
 
@@ -23,30 +24,17 @@ The installer protects `users.json` from rsync deletion. The custom deployer
 sets service UMask 0077. Preserve `users.json` in subsequent backups because it
 contains the device tokens issued by NativeAppleTV. Do not publish that file.
 
-## One-time removal of the custom TorBox integration
+## TorBox preservation and correction
 
-Before stopping Lampac, the deployer requires strict JSON `init.conf`, validates
-its structure and prepares changes. Unsupported/commented JSON or `init.yaml`
-requires manual review; no files are deleted and no service is stopped on that error.
-
-The migration retires these paths, after saving the full stopped installation:
-
-- `mods/TorBox/` and `wwwroot/plugins/torbox/`;
-- `torbox-private.json` and `torbox-settings.json`;
-- `database/torbox-library.json` and `database/torbox-series.json`.
-
-It removes the top-level `TorBox` setting, plugin URLs whose exact path is
-`/torbox.js` or `/plugins/torbox/torbox-cache-refresh.js`, and only known
-TorBox file/directory entries in `excludes.conf`. Comments and unrelated entries
-containing the word TorBox remain. Only changed configs are replaced atomically,
-retaining permissions and ownership. No remote TorBox account or files are changed.
-
-Only a detected legacy installation triggers a pre-downtime scan of
-`cache/static/*.js` (including subdirectories). Files must contain the explicit
-old Online/TorBox script markers; a plain mention of TorBox is insufficient.
-After a successful deployment, `migrations/torbox-removal-v1.done` in the release
-state prevents subsequent scans, unless legacy paths have reappeared. With no
-legacy configuration or paths, configs and cache remain untouched.
+Deployment validates strict JSON configuration before stopping the service and
+preserves TorBox configuration, plugins, credentials and library data. The
+published `custom-v1.90.0-1` erroneously removed this integration. Do not use
+that release when retaining the web TorBox integration. Hosts already upgraded
+with that release need their own saved TorBox configuration and data restored
+from the pre-removal backup, without reverting TimeCode 4 or current accounts.
+The TorBox source baseline is November 13; native Apple TV TorBox experiments,
+including temporary XML/M3U endpoints, are excluded. NativeAppleTV authorization
+and other official 1.90.0 support remain available.
 
 Backups are retained under `${LAMPAC_RELEASE_STATE}-backups/deploy.*` by default
 (actual default: `/root/lampac-release-state-backups/`). The directory is 0700

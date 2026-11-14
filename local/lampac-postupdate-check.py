@@ -24,6 +24,11 @@ HOSTS = json.load(open('/root/lampac-check-hosts.json')) if os.path.isfile('/roo
 
 # patched file -> substrings that must be present (proves the patch survived)
 MARKERS = {
+    'mods/TorBox/Controller.cs': ['torbox/metadata', 'RememberFilm'],
+    'mods/TorBox/Delete.cs': ['torbox/delete/check', 'operation="delete",all=false', 'deletion_confirmed'],
+    'mods/TorBox/Inventory.cs': ['offset=', 'entry.Generation'],
+    'mods/TorBox/Online.cs': ['Разрешение: исходное', 'quality=new JObject()'],
+    'mods/TorBox/plugin.js': ['Удалить из TorBox', 'confirmed: true'],
     'module/PidTor/Controller.cs': ['local patch: tracker names'],
     'module/PidTor/Model.cs': ['Peers'],
     'module/Online/plugin.js': ['pfApply'],
@@ -246,6 +251,8 @@ def check():
         if path == 'online.js' and code == 200 and 'pfApply' not in body:
             code, extra = -1, ' (200 but no filter code: stale disk cache? see memory note: stop lampac, delete cache/static/*online-prestige*)'
         say('OK' if code in ok else 'FAIL', f'/{path} -> {code}{extra}')
+    if any(p.startswith('mods/TorBox/') for p in hashes):
+        say('OK' if 'loaded module: TorBox' in log else 'FAIL', 'TorBox module loaded at last start')
     code, css = http('lampa-main/css/app.css')
     say('OK' if code == 200 and '.noty { background: #303030 !important; color: #fff !important; }' in css else 'FAIL', 'served notification CSS is dark grey with white text')
 

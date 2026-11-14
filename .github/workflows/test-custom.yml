@@ -27,6 +27,10 @@ jobs:
           python3 -m unittest discover -s local/tests -p 'test_*.py'
           python3 local/test_release_tools.py
           python3 local/test_build_cache.py
+          node --check Modules/TorBox/plugin.js
+          node local/tests/torbox_library.cjs
+          node local/tests/torbox_series.cjs
+          node local/tests/torbox_infuse.cjs
           node --check Online/plugin.js
           node local/tests/media_ui.cjs
           bash -n local/build-release.sh local/deploy-host.sh
@@ -54,3 +58,5 @@ jobs:
         run: python3 local/tests/native_sync_http.py --runtime "$RUNNER_TEMP/lampac-public/runtime"
       - name: Media probe and PidTor regression
         run: python3 local/tests/media_http.py --runtime "$RUNNER_TEMP/lampac-public/runtime"
+      - name: TorBox browser and playback regression
+        run: python3 local/tests/torbox_http.py --runtime "$RUNNER_TEMP/lampac-public/runtime"
