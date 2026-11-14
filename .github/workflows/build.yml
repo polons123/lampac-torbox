@@ -6,6 +6,8 @@ on:
       - main
     tags:
       - "*"
+      # Custom ZIPs are assembled by local/build-release.sh, not dotnet publish.
+      - "!custom-*"
   pull_request:
     branches:
       - main

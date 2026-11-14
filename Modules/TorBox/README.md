@@ -2,7 +2,7 @@
 
 This dynamically compiled module lives in `mods/TorBox/` in a release. Its source
 list is in `manifest.json`; it has no standalone csproj. The custom release is
-based on Lampac 1.87.10. Replacing this module does not upgrade Core.
+based on Lampac 1.90.0. Replacing this module does not upgrade Core.
 
 ## Configuration
 

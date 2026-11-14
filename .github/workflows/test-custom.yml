@@ -2,7 +2,7 @@ name: Test custom TorBox and release tools
 
 on:
   push:
-    branches: [custom]
+    branches: [custom, 'upgrade/**']
   pull_request:
     branches: [custom]
   workflow_dispatch:
@@ -37,8 +37,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download 1.87.10 --repo lampac-nextgen/lampac --pattern lampac-nextgen.zip --dir "$RUNNER_TEMP/lampac-public"
-          gh api repos/lampac-nextgen/lampac/releases/tags/1.87.10 > "$RUNNER_TEMP/lampac-public/release.json"
+          gh release download "$(cat local/base)" --repo lampac-nextgen/lampac --pattern lampac-nextgen.zip --dir "$RUNNER_TEMP/lampac-public"
+          gh api "repos/lampac-nextgen/lampac/releases/tags/$(cat local/base)" > "$RUNNER_TEMP/lampac-public/release.json"
           python3 - <<'PY'
           import hashlib, json, os, pathlib, zipfile
           root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'lampac-public'
@@ -54,3 +54,5 @@ jobs:
           PY
       - name: Isolated module compilation and HTTP regression
         run: python3 local/tests/torbox_http.py --runtime "$RUNNER_TEMP/lampac-public/runtime"
+      - name: Native Apple TV authorization and TimeCode migration
+        run: python3 local/tests/native_sync_http.py --runtime "$RUNNER_TEMP/lampac-public/runtime"

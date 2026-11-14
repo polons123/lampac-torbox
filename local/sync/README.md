@@ -69,6 +69,7 @@ unwatch or progress change. Locally observed state changes have separate action
 stamps, and persisted snapshots prevent unchanged observations from advancing
 them. This cannot reconstruct historical action times that Plex never supplied.
 Native clients sending `changed_at` and web clients that omit it can therefore
-still differ. Upgrade Core separately to gain capability 4; installing these
-scripts does not enable it. Offline timestamp, deletion and fallback checks live
+still differ. The custom 1.90.0 package includes capability 4 when the TimeCode module is
+enabled. Older Core installations still require a separate upgrade; installing
+these scripts alone does not enable it. Offline timestamp, deletion and fallback checks live
 in [../tests](../tests/README.md).

@@ -3,7 +3,7 @@
 Commit reviewed sources, create an immutable custom tag, then build from that tag:
 
 ```sh
-local/build-release.sh 1.87.10 custom-v1.87.10-3
+local/build-release.sh 1.90.0 custom-v1.90.0-1
 python3 local/test_release_tools.py
 ```
 
@@ -62,3 +62,7 @@ remain manual checks before promoting a candidate to a stable release.
 
 The custom CI workflow checks `custom` pushes and pull requests with synthetic
 accounts. It does not deploy, push commits, create tags or publish releases.
+
+See [the 1.90.0 upgrade notes](UPGRADE-1.90.0.md) for TimeCode migration,
+Apple TV account binding and rollback requirements. Custom tags are excluded
+from the upstream Build workflow to protect the assembled custom ZIP.

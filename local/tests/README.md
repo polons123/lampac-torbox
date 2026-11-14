@@ -14,7 +14,7 @@ node --check Modules/TorBox/plugin.js
 bash -n local/build-release.sh local/deploy-host.sh
 ```
 
-The HTTP regression harness needs .NET 10 and an extracted public Lampac 1.87.10
+The HTTP regression harness needs .NET 10 and an extracted public Lampac 1.90.0
 runtime (`Core.dll`, `Shared.dll`, Core dependency/runtime JSON and `runtimes/`).
 It creates a temporary instance with synthetic accounts, copies only these
 runtime files and the TorBox module, and redirects TorBox/JacRed to a loopback
@@ -34,3 +34,17 @@ The JS harness checks the library UI's lazy-loading/filter request behavior.
 GitHub Actions runs the same checks and downloads the public runtime without
 secrets. Physical-device playback and live TorBox availability remain manual
 release checks; fixture results do not substitute for those observations.
+
+For 1.90.0, also run:
+
+```sh
+python3 local/tests/native_sync_http.py --runtime /path/to/extracted/public-release
+```
+
+This compiles the real NativeAppleTV, TimeCode, bookmark and TorBox sources in
+two temporary instances. It checks legacy typed/JSON database migration, shared
+device identities, case normalization, account/profile isolation, password/bot
+confirmation, one-time codes, restart persistence, bans, real peer writes and
+the Plex adapter against the actual capability-4 API. It does not contact Plex.
+Use `--modules /path/to/package/module --torbox /path/to/package/mods/TorBox`
+to check module sources extracted from a candidate ZIP.
