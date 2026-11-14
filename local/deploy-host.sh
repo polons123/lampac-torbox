@@ -96,7 +96,7 @@ while read -r hash path; do
   src="$work/app/$path"
   dst="$ROOT/$path"
   if [ -f "$dst" ] && [ "$(sha256sum "$dst" | cut -d' ' -f1)" = "$hash" ]; then continue; fi
-  mkdir -p "$(dirname "$dst")"
+  install -d -m 0755 "$(dirname "$dst")"
   install -o lampac -g lampac -m 0644 "$src" "$dst"
   echo "   + $path"
 done < "$work/overlay.sha256"
