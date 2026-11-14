@@ -31,6 +31,7 @@ fi
 
 map_path() {
   case "$1" in
+    local/deploy-host.sh|local/deploy-state.py) printf 'release-tools/%s\n' "${1#local/}" ;;
     local/lampac-postupdate-check.py) printf 'release-tools/lampac-postupdate-check.py\n' ;;
     local/wwwroot/*)  printf 'wwwroot/%s\n'   "${1#local/wwwroot/}" ;;
     Modules/*)        printf 'module/%s\n'    "${1#Modules/}" ;;

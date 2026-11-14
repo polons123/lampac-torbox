@@ -17,3 +17,9 @@ and verifies authentication, identity isolation, TimeCode migration, peer writes
 and Plex timestamp arbitration. It does not read production configuration or
 contact Plex. Use `--dotnet` for a custom runtime executable and `--modules`
 for sources extracted from a candidate package.
+
+The release-tool check also runs the actual deployment shell script against
+temporary directories and fake systemctl/installer commands. It covers repeat
+migration, malformed configuration before downtime, installer/overlay/atomic
+write/backup/post-start verification failures, retained backups and restoration
+of a previously active or inactive service. No production services are called.

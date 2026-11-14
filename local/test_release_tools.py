@@ -6,6 +6,7 @@ import json
 import pathlib
 import subprocess
 import tempfile
+import sys
 import zipfile
 
 here = pathlib.Path(__file__).resolve().parent
@@ -95,3 +96,5 @@ with tempfile.TemporaryDirectory() as folder:
 for name in ('deploy-host.sh', 'build-release.sh'):
     subprocess.run(['bash', '-n', str(here / name)], check=True)
 print('PASS: manifest drift, snapshot refusal, version mismatch, path validation, CSS tracking, archive/manifest tampering and shell syntax')
+
+subprocess.run([sys.executable, str(here / 'test_deploy.py')], check=True)

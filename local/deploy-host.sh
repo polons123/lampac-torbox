@@ -9,8 +9,40 @@ ROOT=${LAMPAC_ROOT:-/opt/lampac}
 INSTALLER=${LAMPAC_INSTALLER:-/root/lampac_install.sh}
 STATE=${LAMPAC_RELEASE_STATE:-/root/lampac-release-state}
 ASSET_URL="https://github.com/${REPO}/releases/download/${TAG}"
+HELPER="$(dirname "${BASH_SOURCE[0]}")/deploy-state.py"
+CHECKER=${LAMPAC_CHECKER:-/root/lampac_postupdate_check.py}
+DROPIN=${LAMPAC_SYSTEMD_DROPIN:-/etc/systemd/system/lampac.service.d/20-private-files.conf}
+BACKUP_ROOT=${LAMPAC_BACKUP_ROOT:-${STATE}-backups}
 work=$(mktemp -d /tmp/lampac-deploy.XXXXXX)
-trap 'rm -rf "$work"' EXIT
+backup=''
+was_active=0
+touched_service=0
+mutating=0
+complete=0
+systemctl is-active --quiet lampac && was_active=1
+finish() {
+  rc=$?
+  trap - EXIT
+  set +e
+  if [ "$complete" -eq 0 ] && [ "$touched_service" -eq 1 ]; then
+    if [ "$mutating" -eq 1 ]; then
+      if systemctl stop lampac; then
+        python3 "$HELPER" restore "$backup" || echo "ERROR: rollback failed; backup: $backup" >&2
+        systemctl daemon-reload
+      else
+        echo "ERROR: cannot stop Lampac for rollback; backup retained: $backup" >&2
+      fi
+    fi
+    if [ "$was_active" -eq 1 ]; then
+      systemctl start lampac || echo "ERROR: Lampac could not be started; backup: $backup" >&2
+    fi
+  fi
+  rm -rf "$work"
+  exit "$rc"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo '>> Downloading and verifying release before installation'
 curl -fsSL --retry 3 -o "$work/app.zip" "${ASSET_URL}/lampac-nextgen.zip"
@@ -36,58 +68,54 @@ with zipfile.ZipFile(work/'app.zip') as z:
 PY
 (cd "$work/app" && sha256sum --strict -c "$work/overlay.sha256")
 
-# Tighten an existing file too: umask alone only affects newly created files.
-mkdir -p /etc/systemd/system/lampac.service.d
-printf '[Service]\nUMask=0077\n' > /etc/systemd/system/lampac.service.d/20-private-files.conf
-chmod 0644 /etc/systemd/system/lampac.service.d/20-private-files.conf
+# Validate and prepare configuration before any host writes or downtime.
+marker="$STATE/migrations/torbox-removal-v1.done"
+python3 "$HELPER" prepare "$ROOT" "$work" "$marker"
+# Coordinate with the two optional sync tools while copying/restoring SQLite files.
+exec 8> "${LAMPAC_LOCK_DIR:-/tmp}/lampac_sync.lock"
+exec 9> "${LAMPAC_LOCK_DIR:-/tmp}/plex_lampac_sync.lock"
+flock -w 60 8
+flock -w 60 9
+mkdir -p "$BACKUP_ROOT"
+chmod 0700 "$BACKUP_ROOT"
+backup=$(mktemp -d "$BACKUP_ROOT/deploy.XXXXXXXX")
+touched_service=1
+systemctl stop lampac
+python3 "$HELPER" snapshot "$backup" "$ROOT" "$STATE" "$CHECKER" "$DROPIN"
+mutating=1
+# All writes from this point are covered by the stopped snapshot.
+mkdir -p "$(dirname "$DROPIN")"
+printf '[Service]\nUMask=0077\n' > "$DROPIN"
+chmod 0644 "$DROPIN"
 if [ -f "$ROOT/current.conf" ]; then chmod 0600 "$ROOT/current.conf"; fi
 systemctl daemon-reload
-
-# --force avoids the same-version interactive prompt.
 LAMPAC_GITHUB_REPO="$REPO" bash "$INSTALLER" --update --tag "$TAG" --force < /dev/null
-
-changed=0
+# The upstream installer may have started the service.
+systemctl stop lampac
 while read -r hash path; do
   src="$work/app/$path"
   dst="$ROOT/$path"
   if [ -f "$dst" ] && [ "$(sha256sum "$dst" | cut -d' ' -f1)" = "$hash" ]; then continue; fi
-  if [ "$changed" -eq 0 ]; then systemctl stop lampac; fi
   mkdir -p "$(dirname "$dst")"
   install -o lampac -g lampac -m 0644 "$src" "$dst"
   echo "   + $path"
-  changed=$((changed + 1))
 done < "$work/overlay.sha256"
 (cd "$ROOT" && sha256sum --strict -c "$work/overlay.sha256")
 [ "$(cat "$ROOT/version.txt")" = "$TAG" ] || { echo 'Installed version mismatch' >&2; exit 1; }
+python3 "$HELPER" apply "$ROOT" "$work"
 
 mkdir -p "$STATE"
 chmod 0700 "$STATE"
 install -m 0600 "$work/overlay.sha256" "$STATE/overlay.sha256"
 install -m 0600 "$work/build-info.txt" "$STATE/build-info.txt"
 printf '%s\n' "$TAG" > "$STATE/version.txt"
-# A fully verified release replaces previously recorded local patches.
 rm -f "$STATE/overrides.json"
-install -m 0700 "$ROOT/release-tools/lampac-postupdate-check.py" /root/lampac_postupdate_check.py
-# Retire the removed custom TorBox integration (mods/ is installer-protected).
-systemctl stop lampac
-python3 - "$ROOT" <<'PYREMOVE'
-import json,pathlib,shutil,sys
-root=pathlib.Path(sys.argv[1])
-for name in ['mods/TorBox','wwwroot/plugins/torbox','torbox-private.json','torbox-settings.json','database/torbox-library.json','database/torbox-series.json']:
- p=root/name
- if p.is_dir():shutil.rmtree(p)
- elif p.exists():p.unlink()
-p=root/'init.conf';d=json.loads(p.read_text(encoding='utf-8-sig'))
-plugins=d.get('LampaWeb',{}).get('customPlugins',[])
-d.get('LampaWeb',{})['customPlugins']=[x for x in plugins if 'torbox' not in str(x).lower()]
-d.pop('TorBox',None);p.write_text(json.dumps(d,ensure_ascii=False,indent=2)+'\n')
-p=root/'excludes.conf'
-if p.exists():p.write_text('\n'.join(x for x in p.read_text().splitlines() if 'torbox' not in x.lower())+'\n')
-for p in (root/'cache').rglob('*'):
- if p.is_file() and p.stat().st_size<3000000 and b'torbox' in p.read_bytes().lower():p.unlink()
-PYREMOVE
-# Reload the process even for an equal-source reinstall, to discard in-memory scripts.
-if [ "$changed" -gt 0 ]; then systemctl start lampac; else systemctl restart lampac; fi
+install -m 0700 "$ROOT/release-tools/lampac-postupdate-check.py" "$CHECKER"
+systemctl start lampac
 systemctl is-active --quiet lampac
 [ "$(systemctl show -p UMask --value lampac)" = 0077 ]
-echo ">> Installed $TAG; all overlay hashes verified. Review checks before refreshing baseline."
+mkdir -p "$(dirname "$marker")"
+: > "$marker"
+if [ "$was_active" -eq 0 ]; then systemctl stop lampac; fi
+complete=1
+echo ">> Installed $TAG; overlay verified; backup: $backup"

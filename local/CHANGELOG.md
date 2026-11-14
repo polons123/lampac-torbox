@@ -1,17 +1,12 @@
 # Local changes
 
-## Unreleased — TorBox integration removed
+## TorBox integration removed in custom-v1.90.0-1-local
 
 Removed the custom TorBox module, online balancer, browser library and playback hooks. Native clients use their built-in TorBox connection. Lampac 1.90.0, TimeCode 4, native authentication and unrelated provider changes remain.
 
-# Custom candidate based on 1.90.0
+## custom-v1.90.0-1-local — installed locally, not published
 
-- Fix empty TorBox lists in native Lampa: honor `rjson=true` through the complete
-  movie/episode selection flow and return standard playable-video JSON. Keep the
-  existing HTML/browser behavior, including the explicit `nojson` override.
-- Native film links now play unchanged original files directly, with embedded
-  tracks selected by the player's controls.
-- Merge official Lampac 1.90.0, retaining the existing custom TorBox/media/UI overlay.
+- Merge official Lampac 1.90.0, retaining custom media and client changes.
 - Include TimeCode capability 4: separate action and viewing dates, with automatic
   migration of old typed and legacy JSON databases.
 - Include NativeAppleTV sign-in, persistent tokens and binding multiple devices
@@ -20,6 +15,10 @@ Removed the custom TorBox module, online balancer, browser library and playback 
   restart persistence and real HTTP peer/Plex-adapter writes in temporary servers.
 - Exclude `custom-*` tags from the inherited upstream Build workflow so it cannot
   overwrite the custom ZIP. CI uses the upstream version from `local/base`.
+
+Deployment procedure follow-up: prepare legacy TorBox removal
+before downtime, retain a stopped snapshot and restore it on failure. Migration
+is conditional and records successful completion; later deployments skip its cache scan.
 
 Physical Apple TV playback and live Plex writes remain device/operator checks.
 

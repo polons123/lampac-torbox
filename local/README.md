@@ -16,12 +16,22 @@ Upload all three files in `dist/` to the custom release. Never publish an archiv
 built from an older ref while uncommitted runtime patches are installed.
 
 On an existing host, use `local/deploy-host.sh <custom-tag>` from the same tag.
+The archive also bundles `release-tools/deploy-host.sh` and its adjacent
+`deploy-state.py` helper for subsequent upgrades. Keep this pair together.
 It verifies the archive and overlay manifest before invoking the installer, installs
 all overlay paths (including protected `mods/` and `wwwroot/`), verifies every hash,
 and retains the manifest and version in `/root/lampac-release-state/`.
 It also sets the Lampac service's UMask to 0077 and tightens existing current.conf
 to 0600. Application files created later are private to the service user by default.
-Installation briefly restarts Lampac; arrange reviewed rollback copies first.
+The deployer validates the legacy TorBox migration before downtime. It then stops
+Lampac and retains a complete application snapshot (including SQLite files), release
+state, checker and systemd drop-in under `${STATE}-backups/deploy.*` (0700).
+It holds the optional peer/Plex sync locks during this operation. Other external
+writers must be paused separately. Allow disk space for a full copy of the installation.
+An error restores that snapshot and attempts to restart a previously active service;
+the original failure status is preserved and the backup remains available. An
+initially inactive service is left inactive. Uncatchable termination or power loss
+requires manual recovery from the retained backup.
 
 `/root/lampac_postupdate_check.py --local check` checks the installed code against
 that manifest independently of data-only excludes.conf. After a reviewed deployment
@@ -38,7 +48,9 @@ the baseline only after functional checks. The next full verified release deploy
 removes this ledger. This records runtime differences without rewriting a published
 release or silently accepting arbitrary source drift.
 
-Configuration is host-owned and retained. In particular, LampaWeb.cssReplace and
+Configuration is host-owned. The one-time legacy TorBox migration described in
+[the upgrade notes](UPGRADE-1.90.0.md) removes only its known settings and data;
+other configuration is retained. In particular, LampaWeb.cssReplace and
 its served dark notification CSS are checked by the post-update tool. Client and
 account configuration are never copied from another host or published.
 An optional private `/root/lampac-check-hosts.json` supplies the checker fleet roster
