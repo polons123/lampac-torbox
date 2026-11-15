@@ -94,7 +94,6 @@ public partial class TorBoxController
         lock(externalGate)LoadExternal();
         ExternalPlaylist external;
         if(string.IsNullOrEmpty(input.preparation)) {
-            if(externalPlaylists.Count>=128)return Error(429,"Слишком много внешних плейлистов. Отзовите старые в настройках TorBox");
             var source=GetSeries(input.session,key);
             if(!await source.Gate.WaitAsync(TimeSpan.FromSeconds(2),HttpContext.RequestAborted))return Error(429,"Плейлист ещё подготавливается");
             try {
@@ -118,8 +117,6 @@ public partial class TorBoxController
             lock(externalGate) {
                 if(external.Revoked)return Error(410,"Плейлист отозван");
                 string hash=ExternalHash(external.Access);
-                if(!externalPlaylists.ContainsKey(hash) && externalPlaylists.Count>=128)
-                    return Error(429,"Слишком много внешних плейлистов. Отзовите старые в настройках TorBox");
                 var data=ExternalSnapshot();data[hash]=StoredExternal(external);
                 WriteExternal(data);
                 external.Ready=true;

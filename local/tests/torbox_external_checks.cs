@@ -140,9 +140,14 @@ public partial class TorBoxController
         await revoking;
         Check("revocation clears stream caches",pending.Streams.IsEmpty);
 
-        for(int i=0;i<128;i++)externalPlaylists["offline-cap-"+i]=new ExternalPlaylist();
-        Check("existing playlist cap is preserved",Result(await Controller().PrepareExternal(input)).Status==429);
-        externalPlaylists.Clear();
+        for(int i=0;i<128;i++)externalPlaylists[ExternalHash("offline-cap-"+i)]=new ExternalPlaylist{Uid=testUid,State=state,ServerMode=true,Ready=true};
+        var beyondCap=Result(await Controller().PrepareExternal(input));
+        Check("creating a playlist beyond 128 succeeds",beyondCap.Status==200 && externalPlaylists.Count==129);
+        string beyondAccess=((string)beyondCap.Json["playlist"][0]["url"]).Split('/')[6];
+        externalPlaylists.Clear();externalLoaded=false;
+        Check("more than 128 playlists survive reload",Controller().GetExternal(beyondAccess).Ready && externalPlaylists.Count==129);
+        var allRevoked=Result(await Controller().RevokeExternal());
+        Check("manual revoke removes every playlist beyond the old cap",(int?)allRevoked.Json["revoked"]==129 && externalPlaylists.IsEmpty && JObject.Parse(IOFile.ReadAllText(externalPath)).Count==0);
         var episodes=state.Episodes;
         state.Episodes=Enumerable.Repeat(episodes[0],5001).ToList();
         Check("existing episode cap is preserved",Result(await Controller().PrepareExternal(input)).Status==409);

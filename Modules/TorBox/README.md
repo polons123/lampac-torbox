@@ -68,8 +68,8 @@ then clears memory and stream caches without waiting for busy relay locks.
 In-flight relays check revocation and clear detached caches on exit. Other
 UIDs are unaffected.
 Already delivered TorBox stream URLs and playback in progress cannot be revoked
-through Lampac. The existing 128-playlist/5000-episode limits and saved series
-position behavior are preserved.
+through Lampac. There is no limit on the number of saved external playlists.
+The 5000-episode limit per playlist and saved series position behavior remain.
 
 JSON responses through the module guard and external relay responses send
 `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. External players
