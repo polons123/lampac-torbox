@@ -37,6 +37,8 @@ jobs:
           git diff --check
       - name: Deployment directory access as an unprivileged service user
         run: sudo python3 -m unittest local.test_deploy.DeployPermissionTests
+      - name: External playlist permission and revocation
+        run: python3 local/tests/torbox_external.py
       - name: Download public runtime
         env:
           GH_TOKEN: ${{ github.token }}

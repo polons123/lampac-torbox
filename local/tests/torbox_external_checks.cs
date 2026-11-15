@@ -122,8 +122,11 @@ public partial class TorBoxController
         pending.Streams[0]=(DateTime.UtcNow.AddMinutes(1),"https://stream.example/offline");
         await pending.State.Gate.WaitAsync();
         var waiting=Controller(anonymous:true).ExternalSeriesStream(pendingAccess,0);
+        var anotherPlaylist=new ExternalPlaylist{Uid=testUid,State=state,ClientKey=testKey};
+        externalPlaylists["offline-other-playlist"]=anotherPlaylist;
         var revoking=Controller().RevokeExternal();
-        Check("revocation marks an in-flight playlist before waiting",pending.Revoked && !revoking.IsCompleted);
+        Check("revocation completes without waiting for a busy relay",pending.Revoked && revoking.IsCompletedSuccessfully);
+        Check("busy relay cannot delay revocation of other playlists",anotherPlaylist.Revoked && anotherPlaylist.ClientKey==null && externalPlaylists.IsEmpty);
         pending.State.Gate.Release();
         Check("queued relay cannot redirect after revocation",Result(await waiting).Status==410);
         await revoking;

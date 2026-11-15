@@ -56,7 +56,9 @@ Use “Отозвать внешние плейлисты” in TorBox settings 
 `POST /torbox/series/external/revoke` to revoke all existing playlists for the
 current Lampac UID, including playlists issued with an older personal key.
 Revocation remains available when external playlists are disabled. It clears
-retained personal credentials and stream caches. Other UIDs are unaffected.
+retained personal credentials and stream caches without waiting for busy relay
+locks. In-flight relays check revocation and clear detached caches on exit. Other
+UIDs are unaffected.
 Already delivered TorBox stream URLs and playback in progress cannot be revoked
 through Lampac. The existing 128-playlist/5000-episode limits and saved series
 position behavior are preserved.
