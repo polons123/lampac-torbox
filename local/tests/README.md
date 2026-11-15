@@ -35,3 +35,16 @@ It verifies probe deadlines/process-tree termination, concurrent identical
 probes, stderr draining, read-only swarm status and structured PidTor metadata.
 JS filters/statistics apply to the web client; native device rendering remains
 a separate manual check.
+
+External-playlist policy and revocation (offline, temporary console project;
+compiles the actual TorBox manifest sources with Shared):
+
+```sh
+DOTNET=/path/to/dotnet python3 local/tests/torbox_external.py
+```
+
+Requires a .NET 10 SDK or compatible newer SDK. No persistent test project,
+production settings, real accounts or upstream connections are used. Covers
+administrator-only permissions, live policy changes, token expiry, UID isolation,
+personal-key changes and revocation while a relay is waiting for its session lock.
+The HTTP fixture explicitly enables external playlists for its playback checks.

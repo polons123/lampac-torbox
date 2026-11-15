@@ -19,6 +19,7 @@ service user. Replace these example values on the server:
   "api_key": "YOUR_TORBOX_KEY",
   "allowed_uids": ["viewer@example.test"],
   "allow_client_credentials": false,
+  "allow_external_playlists": true,
   "jacred": {
     "base_url": "https://jacred.example",
     "api_key": "YOUR_JACRED_KEY"
@@ -33,6 +34,38 @@ that file is absent, `torbox-settings.json`. It allows authenticated users to
 provide their own TorBox/JacRed settings. Malformed policy files fail closed.
 Client-selected parser addresses are restricted to public HTTP/HTTPS addresses.
 Never commit either runtime configuration file or database state.
+
+## External playlists
+
+Before installing this module update, set `allow_external_playlists: true` in
+`torbox-private.json` if external-player playlists are in use. This is an
+administrator-only boolean, also available in `torbox-settings.json` when the
+private file is absent. The private file takes precedence. Missing/false disables
+creation and resolution of external playlists; an invalid type fails closed.
+Client headers cannot override the permission. Policy is read on each request,
+so changing it requires no restart. Disabling it suspends access; re-enabling it
+restores unexpired links. It does not revoke them.
+
+Links contain a 256-bit random bearer token (32 cryptographic random bytes,
+64 hexadecimal characters). Anyone holding a link can use it without signing in.
+They expire after 12 idle hours or seven days from creation; restart clears them.
+Server-key changes and removal from the server allowlist invalidate access.
+Changing a personal key on a client does not revoke previously issued links.
+
+Use “Отозвать внешние плейлисты” in TorBox settings or authenticated
+`POST /torbox/series/external/revoke` to revoke all existing playlists for the
+current Lampac UID, including playlists issued with an older personal key.
+Revocation remains available when external playlists are disabled. It clears
+retained personal credentials and stream caches. Other UIDs are unaffected.
+Already delivered TorBox stream URLs and playback in progress cannot be revoked
+through Lampac. The existing 128-playlist/5000-episode limits and saved series
+position behavior are preserved.
+
+JSON responses through the module guard and external relay responses send
+`Cache-Control: no-store` and `Referrer-Policy: no-referrer`. External players
+may not honor browser policies. This module-only update does not redact Core,
+proxy or JacRed logs: configure those sinks to exclude bearer paths and query
+`apikey` values. Never share raw playlist URLs in diagnostic reports.
 
 ## Library and playback
 

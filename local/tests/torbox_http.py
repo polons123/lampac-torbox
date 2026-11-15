@@ -41,7 +41,7 @@ os.chmod(p / "init.conf", 0o600)
 shutil.copytree(args.module_dir, p / "mods/TorBox")
 f = p / "mods/TorBox/Controller.cs"
 f.write_text(f.read_text().replace("https://api.torbox.app/v1/api/torrents/", mock_url + "/v1/api/torrents/"))
-private = {"api_key": "fixture-key", "allowed_uids": [uid, second],
+private = {"api_key": "fixture-key", "allowed_uids": [uid, second], "allow_external_playlists": True,
            "jacred": {"base_url": mock_url, "api_key": "fixture-parser-key"}}
 (p / "torbox-private.json").write_text(json.dumps(private))
 os.chmod(p / "torbox-private.json", 0o600)

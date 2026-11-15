@@ -4,6 +4,17 @@ Restored TorBox balancer, browser playback, My TorBox and settings from the Nove
 
 # Local changes
 
+## TorBox external-playlist controls
+
+- Require administrator boolean `allow_external_playlists` for issuing and using
+  external playlists. Set it to `true` before deploying if these playlists are used.
+- Add UID-wide authenticated revocation and a TorBox settings button, including
+  in-flight relay checks and cleanup of retained keys/stream URLs.
+- Add `no-referrer` to guarded JSON responses. Preserve Online integration,
+  playlist/episode limits and series-position tracking. Core log redaction and
+  deployment are outside this module-only change.
+- Add offline policy/revocation checks and retain the isolated 1.90 HTTP checks.
+
 ## Deployment review follow-up
 
 - Budget free space before download, extraction and downtime, including the
