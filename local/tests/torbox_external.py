@@ -21,10 +21,11 @@ with tempfile.TemporaryDirectory(prefix='lampac-torbox-checks-') as directory:
     items = ''.join(f'<Compile Include={quoteattr(str(module / name))} />' for name in sources)
     items += f'<Compile Include={quoteattr(str(root / "local/tests/torbox_external_checks.cs"))} />'
     shared = quoteattr(str(root / 'Shared/Shared.csproj'))
-    (work / 'Checks.csproj').write_text(f'''<Project Sdk="Microsoft.NET.Sdk.Web">
+    (work / 'Checks.csproj').write_text(f'''<Project Sdk="Microsoft.NET.Sdk">
       <PropertyGroup><TargetFramework>net10.0</TargetFramework><OutputType>Exe</OutputType>
       <EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup>
-      <ItemGroup><ProjectReference Include={shared} />{items}</ItemGroup>
+      <ItemGroup><FrameworkReference Include="Microsoft.AspNetCore.App" />
+      <ProjectReference Include={shared} />{items}</ItemGroup>
     </Project>''')
     subprocess.run([dotnet, 'build', str(work / 'Checks.csproj'), '--nologo',
                     '-p:PlaywrightPlatform=linux', '-v:minimal'], cwd=work, check=True)
