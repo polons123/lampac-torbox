@@ -45,6 +45,9 @@ DOTNET=/path/to/dotnet python3 local/tests/torbox_external.py
 
 Requires a .NET 10 SDK or compatible newer SDK. No persistent test project,
 production settings, real accounts or upstream connections are used. Covers
-administrator-only permissions, live policy changes, token expiry, UID isolation,
+administrator-only permissions, live policy changes, permanent links, UID isolation,
 personal-key changes and revocation while a relay is waiting for its session lock.
+Fresh-process checks cover durable server/client playlists, playback with the same
+URL after restart, private file modes, fresh stream URLs, durable revocation and
+failed writes/corrupt stores without silent data loss.
 The HTTP fixture explicitly enables external playlists for its playback checks.

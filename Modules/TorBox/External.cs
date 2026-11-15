@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Concurrent;
+using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Threading.Tasks;
@@ -11,7 +12,7 @@ namespace TorBox;
 public partial class TorBoxController
 {
     // A ticket authorizes only this fixed playlist and its already selected settings.
-    // Client-mode credentials exist in memory only; no API key is put in relay URLs.
+    // Only durable playback settings are stored; stream URLs and runtime locks are not.
     class ExternalPlaylist {
         public SeriesSession State;
         public string Access, Uid, ClientKey;
@@ -19,33 +20,81 @@ public partial class TorBoxController
         public volatile bool Ready;
         public bool ServerMode;
         public volatile bool Revoked;
-        public DateTime Expires=DateTime.UtcNow.AddHours(12), Limit=DateTime.UtcNow.AddDays(7);
         public ConcurrentDictionary<int,(DateTime Until,string Url)> Streams=new();
     }
     static readonly ConcurrentDictionary<string,ExternalPlaylist> externalPlaylists=new();
+    const string externalPath="database/torbox-external.json";
+    // ponytail: one lock for the small playlist store; relays never hold it during upstream I/O.
+    static readonly object externalGate=new();
+    static bool externalLoaded;
+    static void LoadExternal() {
+        if(externalLoaded)return;
+        try {
+            var data=JObject.Parse(System.IO.File.ReadAllText(externalPath));
+            var loaded=data.Properties().Select(p=>(Hash:p.Name,Playlist:p.Value.ToObject<ExternalPlaylist>())).ToArray();
+            if(loaded.Any(x=>!System.Text.RegularExpressions.Regex.IsMatch(x.Hash,"^[A-F0-9]{64}$") ||
+                string.IsNullOrEmpty(x.Playlist?.Uid) || x.Playlist.State?.Episodes==null ||
+                x.Playlist.State.Episodes.Count==0 || x.Playlist.State.Episodes.Any(e=>e.Pick?.Id==null)))
+                throw new InvalidDataException();
+            foreach(var row in loaded) {
+                // Json.NET represents a stored null JToken as JValue.Null, not a null reference.
+                if(row.Playlist.State.Audio?.Type==JTokenType.Null)row.Playlist.State.Audio=null;
+                if(row.Playlist.State.Subtitle?.Type==JTokenType.Null)row.Playlist.State.Subtitle=null;
+                externalPlaylists[row.Hash]=row.Playlist;
+            }
+        }
+        catch(FileNotFoundException) { }
+        catch(DirectoryNotFoundException) { }
+        catch { throw new TorBoxException(503,"Не удалось прочитать сохранённые внешние плейлисты"); }
+        externalLoaded=true;
+    }
+    static JObject StoredExternal(ExternalPlaylist p) => JObject.FromObject(new {
+        p.Uid,p.ClientKey,p.ServerMode,p.Selected,Ready=true,
+        State=new { p.State.Owner,p.State.Title,p.State.Selection,p.State.KeyHash,p.State.FollowId,
+            p.State.Resolution,p.State.Audio,p.State.Subtitle,
+            Episodes=p.State.Episodes.Select(e=>new { e.File,e.Season,e.Episode,e.Numbered,e.Name,
+                e.ExplicitAudio,e.ExplicitSub,Pick=new { e.Pick.Id,e.Pick.Hash,e.Pick.Name } }) }
+    });
+    static void WriteExternal(JObject data) {
+        string temp=externalPath+".tmp-"+Guid.NewGuid().ToString("N");
+        try {
+            Directory.CreateDirectory("database");
+            using(var stream=new FileStream(temp,new FileStreamOptions { Mode=FileMode.CreateNew,
+                Access=FileAccess.Write,Share=FileShare.None,UnixCreateMode=UnixFileMode.UserRead|UnixFileMode.UserWrite })) {
+                using(var writer=new StreamWriter(stream,System.Text.Encoding.UTF8,4096,leaveOpen:true)) {
+                    writer.Write(data.ToString(Newtonsoft.Json.Formatting.None));
+                }
+                stream.Flush(true);
+            }
+            System.IO.File.Move(temp,externalPath,true);
+        }
+        catch { throw new TorBoxException(503,"Не удалось сохранить внешние плейлисты на диске"); }
+        finally { if(System.IO.File.Exists(temp))System.IO.File.Delete(temp); }
+    }
+    static JObject ExternalSnapshot(string exceptUid=null) => new JObject(externalPlaylists
+        .Where(x=>!x.Value.Revoked && x.Value.Uid!=exceptUid).Select(x=>new JProperty(x.Key,StoredExternal(x.Value))));
     public class ExternalInput { public string session {get;set;} public int index {get;set;} public string preparation {get;set;} }
     static string ExternalHash(string value) => SeriesKeyHash(value??"");
     ExternalPlaylist GetExternal(string access) {
-        if(string.IsNullOrEmpty(access) || !System.Text.RegularExpressions.Regex.IsMatch(access,"^[a-f0-9]{64}$") ||
-            !externalPlaylists.TryGetValue(ExternalHash(access),out var playlist))throw new TorBoxException(410,"Срок действия плейлиста истёк. Откройте сериал в Lampa заново");
-        if(playlist.Revoked || playlist.Expires<DateTime.UtcNow || playlist.Limit<DateTime.UtcNow) {
-            externalPlaylists.TryRemove(ExternalHash(access),out _);playlist.ClientKey=null;
-            throw new TorBoxException(410,"Срок действия плейлиста истёк. Откройте сериал в Lampa заново");
+        lock(externalGate) {
+            LoadExternal();
+            if(string.IsNullOrEmpty(access) || !System.Text.RegularExpressions.Regex.IsMatch(access,"^[a-f0-9]{64}$") ||
+                !externalPlaylists.TryGetValue(ExternalHash(access),out var playlist) || playlist.Revoked)
+                throw new TorBoxException(410,"Плейлист отозван или отсутствует. Откройте сериал в Lampa заново");
+            playlist.Access=access;
+            return playlist;
         }
-        return playlist;
     }
-    static SeriesEpisode CopyEpisode(SeriesEpisode e) => new(){Pick=e.Pick,File=e.File,Season=e.Season,Episode=e.Episode,Name=e.Name,
+    static SeriesEpisode CopyEpisode(SeriesEpisode e) => new(){Pick=e.Pick,File=e.File,Season=e.Season,Episode=e.Episode,Numbered=e.Numbered,Name=e.Name,
         Metadata=e.Metadata?.DeepClone(),ExplicitAudio=e.ExplicitAudio,ExplicitSub=e.ExplicitSub};
     [HttpPost,Route("torbox/series/external"),RequestSizeLimit(4096)]
     public Task<ActionResult> PrepareExternal([FromBody] ExternalInput input) => Guard(async(c,key)=>{
         if(!externalPlaylistsAllowed)return Error(403,"Внешние плейлисты отключены администратором");
         if(input==null || input.index<0)return Error(400,"Некорректный плейлист");
+        lock(externalGate)LoadExternal();
         ExternalPlaylist external;
         if(string.IsNullOrEmpty(input.preparation)) {
-            foreach(var item in externalPlaylists.Where(x=>x.Value.Expires<DateTime.UtcNow || x.Value.Limit<DateTime.UtcNow).ToArray()) {
-                if(externalPlaylists.TryRemove(item.Key,out var expired))expired.ClientKey=null;
-            }
-            if(externalPlaylists.Count>=128)return Error(429,"Слишком много внешних плейлистов. Попробуйте позднее");
+            if(externalPlaylists.Count>=128)return Error(429,"Слишком много внешних плейлистов. Отзовите старые в настройках TorBox");
             var source=GetSeries(input.session,key);
             if(!await source.Gate.WaitAsync(TimeSpan.FromSeconds(2),HttpContext.RequestAborted))return Error(429,"Плейлист ещё подготавливается");
             try {
@@ -58,7 +107,6 @@ public partial class TorBoxController
                 string access=Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
                 external=new ExternalPlaylist{State=state,Access=access,Uid=requestInfo.user_uid,ClientKey=serverCredentials?null:key,ServerMode=serverCredentials,
                     Selected=state.Episodes.FindIndex(e=>e.Pick==selected.Pick && e.File==selected.File)};
-                externalPlaylists[ExternalHash(access)]=external;
             }finally{source.Gate.Release();}
         } else {
             external=GetExternal(input.preparation);
@@ -67,9 +115,16 @@ public partial class TorBoxController
         }
         if(!await external.State.Gate.WaitAsync(TimeSpan.FromSeconds(2),HttpContext.RequestAborted))return Error(429,"Плейлист ещё подготавливается");
         try {
-            if(external.Revoked)return Error(410,"Плейлист отозван");
-            external.Expires=DateTime.UtcNow.AddHours(12);
-            external.Ready=true;
+            lock(externalGate) {
+                if(external.Revoked)return Error(410,"Плейлист отозван");
+                string hash=ExternalHash(external.Access);
+                if(!externalPlaylists.ContainsKey(hash) && externalPlaylists.Count>=128)
+                    return Error(429,"Слишком много внешних плейлистов. Отзовите старые в настройках TorBox");
+                var data=ExternalSnapshot();data[hash]=StoredExternal(external);
+                WriteExternal(data);
+                external.Ready=true;
+                externalPlaylists[hash]=external;
+            }
             return Payload(new{success=true,pending=false,selected_index=external.Selected,
                 playlist=external.State.Episodes.Select((e,i)=>new{index=i,title=EpisodeTitle(e),season=e.Season,episode=e.Episode,
                     url=host+"/torbox/series/external/"+external.Access+"/"+i+".m3u8"}).ToArray()});
@@ -78,15 +133,20 @@ public partial class TorBoxController
     // Authenticated account-wide revocation also works after changing a personal key.
     [HttpPost,Route("torbox/series/external/revoke"),RequestSizeLimit(4096)]
     public Task<ActionResult> RevokeExternal() => Guard((c,key)=>{
-        var entries=externalPlaylists.Where(x=>x.Value.Uid==requestInfo.user_uid).ToArray();
-        // Invalidate every selected ticket before cleanup; a busy relay cannot delay others.
-        foreach(var entry in entries)entry.Value.Revoked=true;
-        foreach(var entry in entries) {
-            externalPlaylists.TryRemove(entry.Key,out _);
-            entry.Value.ClientKey=null;
-            entry.Value.Streams.Clear();
+        lock(externalGate) {
+            LoadExternal();
+            var entries=externalPlaylists.Where(x=>x.Value.Uid==requestInfo.user_uid).ToArray();
+            // Persist removal before confirming revocation, so a restart cannot revive links.
+            if(entries.Length>0)WriteExternal(ExternalSnapshot(requestInfo.user_uid));
+            // Invalidate every selected ticket before cleanup; a busy relay cannot delay others.
+            foreach(var entry in entries)entry.Value.Revoked=true;
+            foreach(var entry in entries) {
+                externalPlaylists.TryRemove(entry.Key,out _);
+                entry.Value.ClientKey=null;
+                entry.Value.Streams.Clear();
+            }
+            return Task.FromResult(Payload(new{success=true,revoked=entries.Length}));
         }
-        return Task.FromResult(Payload(new{success=true,revoked=entries.Length}));
     });
     [HttpGet,HttpHead,AllowAnonymous,Route("torbox/series/external/{access}/{index:int}.m3u8")]
     public async Task<ActionResult> ExternalSeriesStream(string access,int index) {
@@ -106,7 +166,6 @@ public partial class TorBoxController
             if(!await external.State.Gate.WaitAsync(TimeSpan.FromSeconds(10),HttpContext.RequestAborted))return Error(429,"Поток ещё подготавливается");
             try {
                 if(external.Revoked)return Error(410,"Плейлист отозван");
-                external.Expires=DateTime.UtcNow.AddHours(12);
                 if(!external.Streams.TryGetValue(index,out var cached) || cached.Until<DateTime.UtcNow) {
                     var stream=await ResolveSeriesStream(external.State,index,key);
                     cached=(DateTime.UtcNow.AddSeconds(30),stream.Url);external.Streams[index]=cached;

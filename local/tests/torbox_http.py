@@ -215,6 +215,17 @@ def api(path, body=None, identity=uid):
     code, raw = get(path, body, identity)
     return code, json.loads(raw)
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+def external_relay(url):
+    try:
+        with urllib.request.build_opener(NoRedirect).open(url, timeout=20) as response:
+            return response.status, response.headers.get('Location')
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.headers.get('Location')
+
 checks = []
 
 def check(name, ok):
@@ -339,6 +350,16 @@ try:
     check("saved episode numbers include stopped portion", json.loads(lib.read_text())[watch]["Episodes"] == [1, 2, 3])
     code, external = api("/torbox/series/external", {"session": session, "index": 0})
     check("external playlist cannot bypass ambiguity", code == 200 and [x["episode"] for x in external["playlist"]] == [1])
+    external_url = external["playlist"][0]["url"]
+    check("external playlist is saved privately on disk", (p / 'database/torbox-external.json').stat().st_mode & 0o777 == 0o600)
+    stop()
+    start()
+    check("same anonymous external URL works after Lampac restart", external_relay(external_url) == (302, 'https://media.example/10/1.m3u8'))
+    check("other account cannot revoke a saved external link", api('/torbox/series/external/revoke', {}, identity=second)[1]['revoked'] == 0 and external_relay(external_url)[0] == 302)
+    check("owner revokes saved external playlist", api('/torbox/series/external/revoke', {})[1]['revoked'] == 1)
+    stop()
+    start()
+    check("external revocation survives another Lampac restart", external_relay(external_url)[0] == 410)
     check("forget rejects another account", api("/torbox/series/forget", {"id": watch}, identity=second)[0] == 404)
     check("forget succeeds for owner", api("/torbox/series/forget", {"id": watch})[0] == 200)
     inventory = [q for q in state["mylist"] if q.get("limit") == ["1000"]]

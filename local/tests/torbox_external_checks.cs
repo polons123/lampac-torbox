@@ -47,25 +47,33 @@ public partial class TorBoxController
 
     sealed class MockHttp : HttpMessageHandler {
         public int Calls;
+        public bool Playback;
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token) {
             Calls++;
+            if(Playback) {
+                Check("restored playlist requests the saved torrent and episode",request.RequestUri.Query.Contains("id=42&file_id=7"));
+                return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK){Content=new StringContent(
+                    new JObject{["success"]=true,["data"]=new JObject{["hls_url"]="https://stream.example/fresh-after-restart",
+                        ["metadata"]=new JObject{["audios"]=new JArray(),["subtitles"]=new JArray(),["video"]=new JObject{["height"]=1080}}}}.ToString())});
+            }
             throw new Exception("Unexpected upstream request in offline playlist checks");
         }
     }
-    public static async Task Main() {
+    public static async Task Main(string[] args) {
         CoreInit.conf=new CoreInit();
         var mock=new MockHttp();
         var handler=typeof(HttpMessageInvoker).GetField("_handler",BindingFlags.Instance|BindingFlags.NonPublic)
             ?? throw new Exception("Cannot install offline HTTP handler");
         handler.SetValue(client,mock);handler.SetValue(publicClient,mock);
-        await ExternalChecks(mock);
+        if(args.Length>0)await PersistenceChecks(args[0],args[1]=="client",mock);
+        else await ExternalChecks(mock);
         Console.WriteLine($"TorBox external playlists: {checks} checks passed (offline).");
     }
 
     static async Task ExternalChecks(MockHttp mock) {
         Policy();seriesSessions.Clear();externalPlaylists.Clear();
         var c=Controller();await Probe(c);
-        var state=new SeriesSession{Owner=testUid,KeyHash=SeriesKeyHash(testKey),Episodes=new List<SeriesEpisode>{new(){Season=1,Episode=1,Name="One",Pick=new Pick(),File=1}}};
+        var state=new SeriesSession{Owner=testUid,KeyHash=SeriesKeyHash(testKey),Episodes=new List<SeriesEpisode>{new(){Season=1,Episode=1,Name="One",Pick=new Pick{Id=42},File=1}}};
         seriesSessions["offline-session"]=state;
         var input=new ExternalInput{session="offline-session",index=0};
         Check("external playlist creation disabled by default",Result(await c.PrepareExternal(input)).Status==403 && externalPlaylists.IsEmpty);
@@ -78,7 +86,7 @@ public partial class TorBoxController
         Check("external token has 32 random bytes encoded as 64 hex characters",System.Text.RegularExpressions.Regex.IsMatch(access,"^[a-f0-9]{64}$"));
         Check("relay URL contains no account keys",!url.Contains(testKey) && !url.Contains("offline-parser-key"));
         var playlist=c.GetExternal(access);
-        Check("external lifetime has idle and absolute bounds",playlist.Expires>DateTime.UtcNow.AddHours(11) && playlist.Limit<DateTime.UtcNow.AddDays(7).AddSeconds(1));
+        Check("external playlists have no expiry fields",typeof(ExternalPlaylist).GetField("Expires")==null && typeof(ExternalPlaylist).GetField("Limit")==null);
         playlist.Streams[0]=(DateTime.UtcNow.AddSeconds(30),"https://stream.example/offline");
         var relay=Controller(anonymous:true);
         Check("valid bearer can resolve without client headers",await relay.ExternalSeriesStream(access,0) is RedirectResult);
@@ -86,19 +94,19 @@ public partial class TorBoxController
         Policy(external:false);
         Check("administrator can disable existing bearer links",Result(await Controller().ExternalSeriesStream(access,0)).Status==403);
         Policy(external:true);
-        Check("re-enabling policy restores unexpired links",await Controller(anonymous:true).ExternalSeriesStream(access,0) is RedirectResult);
+        Check("re-enabling policy restores links that have not been revoked",await Controller(anonymous:true).ExternalSeriesStream(access,0) is RedirectResult);
         var changed=JObject.Parse(IOFile.ReadAllText(configPath));changed["api_key"]="other-offline-placeholder-key";IOFile.WriteAllText(configPath,changed.ToString());
         Check("server key change invalidates bearer links",Result(await Controller().ExternalSeriesStream(access,0)).Status==410);
         Policy(external:true);
         changed=JObject.Parse(IOFile.ReadAllText(configPath));changed["allowed_uids"]=new JArray("other");IOFile.WriteAllText(configPath,changed.ToString());
         Check("server UID removal invalidates bearer links",Result(await Controller().ExternalSeriesStream(access,0)).Status==403);
-        Policy(external:true);playlist.Expires=DateTime.UtcNow.AddSeconds(-1);
-        Check("idle expiration invalidates bearer",Result(await Controller().ExternalSeriesStream(access,0)).Status==410);
+        Policy(external:true);playlist.State.Expires=DateTime.UtcNow.AddYears(-1);
+        Check("external playlist survives expiration of browser session",await Controller().ExternalSeriesStream(access,0) is RedirectResult);
+        state.Expires=DateTime.UtcNow.AddHours(1);
         var another=Result(await Controller().PrepareExternal(input)).Json;
         string access2=((string)another["playlist"][0]["url"]).Split('/')[6];
         Check("new playlists receive different tokens",access!=access2);
-        var p2=c.GetExternal(access2);p2.Limit=DateTime.UtcNow.AddSeconds(-1);
-        Check("absolute expiration overrides renewed idle time",Result(await Controller().ExternalSeriesStream(access2,0)).Status==410);
+        await Controller().RevokeExternal();
         var third=Result(await Controller().PrepareExternal(input)).Json;
         string access3=((string)third["playlist"][0]["url"]).Split('/')[6];
         Policy(true,external:true);
@@ -152,6 +160,57 @@ public partial class TorBoxController
         Check("guard suppresses caching and referrers",guarded.Response.Headers["Cache-Control"]=="no-store" && guarded.Response.Headers["Referrer-Policy"]=="no-referrer");
         Check("offline checks never call upstream",mock.Calls==0);
 
+        Policy(external:true);state.Expires=DateTime.UtcNow.AddHours(1);
+        IOFile.Delete(externalPath);System.IO.Directory.CreateDirectory(externalPath);
+        Check("failed disk write does not issue an ephemeral playlist",Result(await Controller().PrepareExternal(input)).Status==503 && externalPlaylists.IsEmpty);
+        System.IO.Directory.Delete(externalPath);
+        IOFile.WriteAllText(externalPath,"{broken");externalLoaded=false;
+        Check("corrupt store fails closed without overwriting saved data",Result(await Controller().PrepareExternal(input)).Status==503 && IOFile.ReadAllText(externalPath)=="{broken");
+
+    }
+
+    static async Task PersistenceChecks(string phase,bool clientMode,MockHttp mock) {
+        if(phase=="seed") {
+            Policy(clientMode,external:true);
+            var c=Controller(key:clientMode?testKey:null);await Probe(c);
+            var state=new SeriesSession{Owner=c.metadataOwner,Title="Saved series",KeyHash=SeriesKeyHash(testKey),Resolution=720,
+                Selection="Saved playback choice",FollowId="offline-follow",Episodes=new List<SeriesEpisode>{new(){
+                    Pick=new Pick{Id=42,Hash="saved-release-hash",Link="https://tracker.example/private-passkey"},
+                    File=7,Season=2,Episode=3,Numbered=true,Name="S02E03.mkv",ExplicitAudio=0,ExplicitSub=-1,
+                    Metadata=new JObject{["hls_url"]="https://stream.example/old-private-stream"}}}};
+            seriesSessions["persist-session"]=state;
+            var result=Result(await c.PrepareExternal(new ExternalInput{session="persist-session",index=0}));
+            Check("playlist persisted before successful response",result.Status==200 && IOFile.Exists(externalPath));
+            string access=((string)result.Json["playlist"][0]["url"]).Split('/')[6];
+            IOFile.WriteAllText("fixture-access",access);
+            string saved=IOFile.ReadAllText(externalPath);
+            Check("store omits raw bearer tokens and transient upstream URLs",!saved.Contains(access) && !saved.Contains("private-passkey") && !saved.Contains("old-private-stream"));
+            Check("server credentials never copied into playlist store",clientMode || !saved.Contains(testKey));
+            Check("playlist store is private",IOFile.GetUnixFileMode(externalPath)==(System.IO.UnixFileMode.UserRead|System.IO.UnixFileMode.UserWrite));
+        } else {
+            string access=IOFile.ReadAllText("fixture-access");
+            if(phase=="restore") {
+                var c=Controller(anonymous:true);var saved=c.GetExternal(access);
+                Check("new process restores selected playback settings",saved.Ready && saved.State.Resolution==720 && saved.State.Selection=="Saved playback choice" && saved.State.FollowId=="offline-follow" && saved.State.Episodes[0].Numbered);
+                Check("new process restores client credentials when required",saved.ClientKey==(clientMode?testKey:null));
+                Check("temporary metadata and stream cache are regenerated",saved.Streams.IsEmpty && saved.State.Episodes[0].Metadata==null);
+                mock.Playback=true;
+                var response=await c.ExternalSeriesStream(access,0);
+                if(response is ContentResult error)Console.WriteLine("Fixture relay: "+error.Content+"; calls="+mock.Calls);
+                var redirect=response as RedirectResult;
+                Check("same external URL plays after process restart",redirect?.Url=="https://stream.example/fresh-after-restart" && mock.Calls==2);
+                Policy(clientMode,external:false);
+                // A failed durable revoke must report failure and leave the existing store intact.
+                string original=IOFile.ReadAllText(externalPath);IOFile.Delete(externalPath);System.IO.Directory.CreateDirectory(externalPath);
+                Check("failed revocation is not reported as successful",Result(await Controller(key:clientMode?testKey:null).RevokeExternal()).Status==503 && !saved.Revoked);
+                System.IO.Directory.Delete(externalPath);IOFile.WriteAllText(externalPath,original);
+                var revoked=Result(await Controller(key:clientMode?"changed-offline-placeholder-key":null).RevokeExternal());
+                Check("restored playlist can be durably revoked with policy disabled",revoked.Status==200 && (int?)revoked.Json["revoked"]==1);
+            } else {
+                Check("revocation survives another fresh process",Result(await Controller(anonymous:true).ExternalSeriesStream(access,0)).Status==410);
+                Check("revocation removes credentials from disk",!IOFile.ReadAllText(externalPath).Contains(testKey));
+            }
+        }
     }
 
 }

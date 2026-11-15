@@ -30,3 +30,9 @@ with tempfile.TemporaryDirectory(prefix='lampac-torbox-checks-') as directory:
     subprocess.run([dotnet, 'build', str(work / 'Checks.csproj'), '--nologo',
                     '-p:PlaywrightPlatform=linux', '-v:minimal'], cwd=work, check=True)
     subprocess.run([dotnet, str(work / 'bin/Debug/net10.0/Checks.dll')], cwd=work, check=True)
+    for mode in ('server', 'client'):
+        fixture = work / mode
+        fixture.mkdir()
+        for phase in ('seed', 'restore', 'revoked'):
+            subprocess.run([dotnet, str(work / 'bin/Debug/net10.0/Checks.dll'), phase, mode],
+                           cwd=fixture, check=True)
