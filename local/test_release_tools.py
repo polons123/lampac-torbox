@@ -97,9 +97,12 @@ with tempfile.TemporaryDirectory() as folder:
     (release / 'overrides.json').write_text(json.dumps(ledger))
     check.out.clear(); assert check.release_hashes() == {}
     del ledger['files']['../unsafe']
+    (release / 'overrides.json').write_text(json.dumps(ledger))
+    check.out.clear(); check.verify_release()
+    assert not any(level == 'FAIL' for level, _ in check.out), check.out
     target.write_text('unrecorded drift')
     check.out.clear(); check.verify_release()
-    assert any(level == 'FAIL' for level, _ in check.out)
+    assert ('FAIL', 'module/Online/plugin.js: does not match installed release manifest') in check.out, check.out
     ledger['files']['module/Online/plugin.js']['base_sha256'] = '0' * 64
     (release / 'overrides.json').write_text(json.dumps(ledger))
     check.out.clear(); assert check.release_hashes() == {}

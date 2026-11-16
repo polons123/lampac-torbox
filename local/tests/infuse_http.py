@@ -76,6 +76,7 @@ with tempfile.TemporaryDirectory(prefix='lampac-infuse-test-') as tmp:
             check(request('/infuse/named', {'links': [batch['links'][0], {'url': bad, 'filename': filename}]}, uid)[0] == 400)
         check(not (app / 'database/infuse-links.json').exists())
         named, second = prepare(), prepare(other)
+        check(len(json.loads((app / 'database/infuse-links.json').read_bytes().decode('utf-8'))) == 2)
         check(request(named)[0:1] == (302,))
         code, headers, _ = request(named)
         check(code == 302 and headers['Location'] == target and headers['Referrer-Policy'] == 'no-referrer')

@@ -3,7 +3,6 @@
 import json
 import os
 import pwd
-import stat
 from pathlib import Path
 import shutil
 import subprocess
@@ -67,13 +66,9 @@ def directories(root, work, user):
     for path in paths:
         if not path.exists():
             path.mkdir(mode=0o755)
-            os.chmod(path, 0o755)
-            os.chown(path, account.pw_uid, account.pw_gid)
-    for path, ok in zip(paths, accessible(paths, user)):
-        if not ok:
-            # Repair only managed code directories; keep private modes and the root intact.
-            os.chown(path, account.pw_uid, account.pw_gid)
-            os.chmod(path, stat.S_IMODE(path.stat().st_mode) | 0o500)
+        # Normalize only managed code directories; keep private data and the root intact.
+        os.chown(path, account.pw_uid, account.pw_gid)
+        os.chmod(path, 0o755)
     if not all(accessible(paths, user)):
         raise ValueError('service user cannot traverse overlay directories')
 

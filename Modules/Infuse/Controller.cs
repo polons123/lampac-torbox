@@ -53,7 +53,7 @@ public class InfuseController : BaseController
             Directory.CreateDirectory("database");
             using (var stream = new FileStream(temp, new FileStreamOptions { Mode = FileMode.CreateNew,
                 Access = FileAccess.Write, Share = FileShare.None, UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite })) {
-                using (var writer = new StreamWriter(stream, Encoding.UTF8, 4096, leaveOpen: true))
+                using (var writer = new StreamWriter(stream, new UTF8Encoding(false), 4096, leaveOpen: true))
                     writer.Write(JsonConvert.SerializeObject(data));
                 stream.Flush(true);
             }

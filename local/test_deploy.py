@@ -247,7 +247,11 @@ class DeployPermissionTests(unittest.TestCase):
             paths=[parent,parent/'TorBox',parent/'TorBox/new']
             self.assertTrue(all(helper['accessible'](paths,user.pw_name)))
             self.assertEqual(parent.stat().st_uid,user.pw_uid)
-            self.assertEqual(parent.stat().st_mode & 0o777,0o700)
+            self.assertTrue(all(p.stat().st_mode & 0o777 == 0o755 for p in paths))
+            # Already readable root-owned directories must also be normalized.
+            os.chown(parent,0,0)
+            helper['directories'](root,work,user.pw_name)
+            self.assertTrue(all((p.stat().st_uid,p.stat().st_gid) == (user.pw_uid,user.pw_gid) for p in paths))
             self.assertEqual(root.stat().st_mode & 0o777,0o700)
             self.assertEqual(private.stat().st_mode & 0o777,0o700)
             self.assertEqual(private.stat().st_uid,0)
