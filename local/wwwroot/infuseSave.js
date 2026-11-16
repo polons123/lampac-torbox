@@ -854,7 +854,10 @@
       }
       // Carry movie and episode names in the saved URL as well as the filename parameter.
       if (!preparedLinks.length) return;
-      if (namedSavePending) return;
+      if (namedSavePending) {
+        Lampa.Noty.show('Предыдущее сохранение Infuse ещё готовится. Дождитесь завершения и повторите выбор');
+        return;
+      }
       namedSavePending = true;
       namedLinks(preparedLinks, function (links) {
         namedSavePending = false;

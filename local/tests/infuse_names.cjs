@@ -19,6 +19,7 @@ api.sendPreparedLinks(series);
 assert.equal(requests.length, 1);assert.equal(sent.length, 0);
 assert.equal(requests[0].links[0].url, original);
 api.sendPreparedLinks(series);assert.equal(requests.length, 1, 'duplicate click waits for pending preparation');
+assert.equal(notices.length, 1, 'pending preparation is explained');
 complete(requests[0]);
 assert.equal(sent[0].protocol, 'infuse:');assert.equal(sent[0].hostname, 'x-callback-url');
 assert.equal(sent[0].searchParams.getAll('url').length, 2);
@@ -28,11 +29,17 @@ for (const [i, url] of sent[0].searchParams.getAll('url').entries()) {
 }
 assert.deepEqual(sent[0].searchParams.getAll('filename'), series.map(x => x.filename));
 api.sendPreparedLinks(series);requests[1].fail();
-assert.equal(sent.length, 1, 'failed preparation never sends raw UUID URLs');assert.equal(notices.length, 1);
+assert.equal(sent.length, 1, 'failed preparation never sends raw UUID URLs');assert.equal(notices.length, 2);
 api.sendPreparedLinks(series);assert.equal(requests.length, 3, 'failure releases pending guard');complete(requests[2]);
 const movie = { url: original, filename: 'Movie (2026) {tmdb-55}.mkv' };
-api.sendPreparedLinks([movie]);assert.equal(requests.length, 4);complete(requests[3]);
+api.sendPreparedLinks([movie]);assert.equal(requests.length, 4);
+assert.equal(requests[3].links[0].url, original, 'movie request retains the exact signed source URL');
+api.sendPreparedLinks([{url: original + '&other=1', filename: 'Other Movie.mkv'}]);
+assert.equal(requests.length, 4, 'another file cannot replace a pending movie');
+assert.equal(notices.length, 3, 'another file receives pending feedback');
+complete(requests[3]);
 assert(sent[2].searchParams.get('url').includes('/infuse/file/'));
+assert.equal(decodeURIComponent(new URL(sent[2].searchParams.get('url')).pathname.split('/').pop()), movie.filename);
 assert.equal(sent[2].searchParams.get('filename'), movie.filename);
 const tv = { id: 123, media_type: 'tv', original_name: 'Show', name: 'Show', first_air_date: '2026-01-01' };
 const data = { element: { url: original, name: 'Show.S01E03.mkv', season: 1, episode: 3 }, params: { movie: tv }, menu: [] };

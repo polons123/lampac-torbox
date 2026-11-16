@@ -63,8 +63,8 @@ with tempfile.TemporaryDirectory(prefix='lampac-infuse-test-') as tmp:
     filename = 'Тест & Show (2026) S01E01 - Серия #1.mkv'
     target = 'http://torrserver.example/stream?link=hash&index=1&play&signature=abc%2Fdef'
     batch = {'links': [{'url': target, 'filename': filename}]}
-    def prepare(user=uid):
-        code, headers, raw = request('/infuse/named', batch, user)
+    def prepare(user=uid, links=batch):
+        code, headers, raw = request('/infuse/named', links, user)
         check(code == 200 and headers['Cache-Control'] == 'no-store')
         return json.loads(raw)['links'][0]['url']
     try:
@@ -77,6 +77,12 @@ with tempfile.TemporaryDirectory(prefix='lampac-infuse-test-') as tmp:
         check(not (app / 'database/infuse-links.json').exists())
         named, second = prepare(), prepare(other)
         check(len(json.loads((app / 'database/infuse-links.json').read_bytes().decode('utf-8'))) == 2)
+        movie_name = 'Фильм & Movie (2026) {tmdb-55}.mkv'
+        movie = prepare(links={'links': [{'url': target, 'filename': movie_name}]})
+        from urllib.parse import urlsplit, unquote
+        check(unquote(urlsplit(movie).path.rsplit('/', 1)[1]) == movie_name)
+        code, headers, _ = request(movie)
+        check(code == 302 and headers['Location'] == target)
         check(request(named)[0:1] == (302,))
         code, headers, _ = request(named)
         check(code == 302 and headers['Location'] == target and headers['Referrer-Policy'] == 'no-referrer')
@@ -86,6 +92,7 @@ with tempfile.TemporaryDirectory(prefix='lampac-infuse-test-') as tmp:
         check(named.split('token=')[1] not in (app / 'database/infuse-links.json').read_text())
         stop(); start()
         check(request(named)[1]['Location'] == target)
+        check(request(movie)[1]['Location'] == target)
         # TorBox exists but has no private settings/key; generic links must still work.
         stop()
         shutil.copytree(repo / 'Modules/TorBox', app / 'mods/TorBox')
@@ -106,7 +113,7 @@ with tempfile.TemporaryDirectory(prefix='lampac-infuse-test-') as tmp:
         check(request(second)[0] == 410 and request(named)[0] == 302)
         check(request('/infuse/revoke', {}, uid)[0] == 200)
         stop(); start()
-        check(all(request(url)[0] == 410 for url in [named, third, fourth]))
+        check(all(request(url)[0] == 410 for url in [named, third, fourth, movie]))
         # Corruption fails closed and never overwrites the store.
         stop(); (app / 'database/infuse-links.json').write_text('broken')
         start()
