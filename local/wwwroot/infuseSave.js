@@ -852,9 +852,8 @@
         }).join('&');
         window.location.assign('infuse://x-callback-url/save?' + params);
       }
-      // iCloud can lose the separate filename. Carry episode names in the saved URL too.
-      var series = preparedLinks.some(function (item) { return /\bS\d{2}E\d{2,3}\b/i.test(item.filename); });
-      if (!series) return launch(preparedLinks);
+      // Carry movie and episode names in the saved URL as well as the filename parameter.
+      if (!preparedLinks.length) return;
       if (namedSavePending) return;
       namedSavePending = true;
       namedLinks(preparedLinks, function (links) {

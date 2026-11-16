@@ -9,7 +9,7 @@ account. Playback checks the owning account too.
 "filename": "Show S01E01.mkv" }] }`. It atomically saves validated links before
 returning named URLs. `GET`/`HEAD /infuse/file/{filename}?token=...` redirects to
 the exact original URL, without fetching media. Names are carried in the actual
-URL path to survive Infuse sync. Movies retain their direct handoff.
+URL path for Infuse sync. Movies and episodes use the same named redirects.
 
 Tokens contain 256 random bits. Only hashes are saved in the private, atomically
 written `database/infuse-links.json` (0600). There is no expiry or link-count
