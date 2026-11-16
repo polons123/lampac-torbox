@@ -13,6 +13,7 @@
     <Project Path="Modules/ExternalBind/ExternalBind.csproj" />
     <Project Path="Modules/GStreamer/GStreamer.csproj" />
     <Project Path="Modules/JacRed/JacRed.csproj" />
+    <Project Path="Modules/Infuse/Infuse.csproj" />
     <Project Path="Modules/Kit/Kit.csproj" />
     <Project Path="Modules/LampacApk/LampacApk.csproj" />
     <Project Path="Modules/LampaWeb/LampaWeb.csproj" />

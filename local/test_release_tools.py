@@ -81,6 +81,22 @@ with tempfile.TemporaryDirectory() as folder:
     check.out.clear(); check.verify_release()
     assert not any(level == 'FAIL' for level, _ in check.out), check.out
     assert (release / 'overlay.sha256').read_text() == base_manifest
+    # A newly added module has no base file, but remains bound to this release.
+    addition = app / 'module/Infuse/manifest.json'
+    addition.parent.mkdir(parents=True)
+    addition.write_text('{"enable":true}')
+    ledger['files']['module/Infuse/manifest.json'] = {'base_sha256': None,
+        'sha256': hashlib.sha256(addition.read_bytes()).hexdigest()}
+    (release / 'overrides.json').write_text(json.dumps(ledger))
+    check.out.clear(); check.verify_release()
+    assert not any(level == 'FAIL' for level, _ in check.out), check.out
+    addition.write_text('tampered')
+    check.out.clear(); check.verify_release()
+    assert any(level == 'FAIL' for level, _ in check.out)
+    ledger['files']['../unsafe'] = ledger['files'].pop('module/Infuse/manifest.json')
+    (release / 'overrides.json').write_text(json.dumps(ledger))
+    check.out.clear(); assert check.release_hashes() == {}
+    del ledger['files']['../unsafe']
     target.write_text('unrecorded drift')
     check.out.clear(); check.verify_release()
     assert any(level == 'FAIL' for level, _ in check.out)

@@ -56,3 +56,9 @@ The HTTP fixture explicitly enables external playlists for its playback checks.
 single/bulk handoff, signed-target preservation, pending/error/profile guards
 and unchanged movie handoff. The backend and HTTP checks also cover named-link
 persistence, exact redirect targets, policy/UID guards and durable manual revoke.
+
+`python3 local/tests/infuse_http.py --runtime /path/to/release --dotnet /path/to/dotnet`
+checks the independent Infuse module in the real isolated runtime with TorBox
+absent, missing its settings/key, and pointing to an unreachable API. It verifies
+signed targets, Unicode filenames, account isolation, restarts, durable revoke,
+private storage and fail-closed handling of a corrupt store.

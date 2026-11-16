@@ -118,7 +118,10 @@ def release_hashes():
             if not isinstance(patches, dict) or not patches:
                 raise ValueError('empty local patch ledger')
             for path, patch in patches.items():
-                if not isinstance(patch, dict) or path not in result or patch.get('base_sha256') != result[path] or not re.fullmatch('[a-f0-9]{64}', str(patch.get('sha256', ''))):
+                if (not path.startswith(('mods/', 'module/', 'wwwroot/', 'release-tools/')) or
+                    any(p in ('', '.', '..') for p in path.split('/')) or not isinstance(patch, dict) or
+                    'base_sha256' not in patch or patch['base_sha256'] != result.get(path) or
+                    not re.fullmatch('[a-f0-9]{64}', str(patch.get('sha256', '')))):
                     raise ValueError('invalid local patch entry')
                 result[path] = patch['sha256']
             say('INFO', f'{len(patches)} recorded local patches over the installed release')

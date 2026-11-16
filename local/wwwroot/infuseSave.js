@@ -818,6 +818,33 @@
     // The tvOS Lampa bridge (lampa://saveAllToInfuse) drops the filename, so a
     // directly opened infuse:// save is the only path that keeps it.
     var namedSavePending = false;
+    var infuseScript = document.currentScript && document.currentScript.src || window.location.href;
+    var infuseServer = new URL(infuseScript, window.location.href);
+    function infuseIdentity() {
+      return infuseServer.origin + '|' + Lampa.Storage.get('account_email', '') + '|' + Lampa.Storage.get('lampac_unic_id', '');
+    }
+    function infuseRequest(path, body, done, failed) {
+      var identity = infuseIdentity();
+      var url = new URL('/infuse/' + path, infuseServer.origin);
+      var email = Lampa.Storage.get('account_email', '');
+      var uid = Lampa.Storage.get('lampac_unic_id', '');
+      var token = infuseServer.searchParams.get('token') || new URL(window.location.href).searchParams.get('token');
+      if (email) url.searchParams.set('account_email', email);
+      if (uid) url.searchParams.set('uid', uid);
+      if (token) url.searchParams.set('token', token);
+      $.ajax({ url: url.href, method: 'POST', contentType: 'application/json', dataType: 'json',
+        data: JSON.stringify(body), timeout: 15000, cache: false,
+        success: function (result) {
+          if (identity !== infuseIdentity() || !result || !result.success) return failed();
+          done(result);
+        }, error: failed });
+    }
+    function namedLinks(links, done, failed) {
+      infuseRequest('named', { links: links }, function (result) {
+        if (!Array.isArray(result.links) || result.links.length !== links.length) return failed();
+        done(result.links);
+      }, failed);
+    }
     function sendPreparedLinks(preparedLinks) {
       function launch(links) {
         var params = links.map(function (item) {
@@ -827,10 +854,10 @@
       }
       // iCloud can lose the separate filename. Carry episode names in the saved URL too.
       var series = preparedLinks.some(function (item) { return /\bS\d{2}E\d{2,3}\b/i.test(item.filename); });
-      if (!series || !window.lampac_infuse_named_links) return launch(preparedLinks);
+      if (!series) return launch(preparedLinks);
       if (namedSavePending) return;
       namedSavePending = true;
-      window.lampac_infuse_named_links(preparedLinks, function (links) {
+      namedLinks(preparedLinks, function (links) {
         namedSavePending = false;
         launch(links);
       }, function () {
@@ -878,6 +905,13 @@
     }
     function add() {
       Lampa.Listener.follow('torrent_file', onTorrentFileLongPress);
+      Lampa.SettingsApi.addComponent({ component: 'infuse', name: 'Infuse', icon: INFUSE_LOGO });
+      Lampa.SettingsApi.addParam({ component: 'infuse', param: { type: 'button' },
+        field: { name: 'Отозвать ссылки Infuse', description: 'Отключить все именные ссылки этого аккаунта, сохранённые из TorBox и TorrServer' },
+        onChange: function () {
+          infuseRequest('revoke', {}, function () { Lampa.Noty.show('Ссылки Infuse отозваны'); },
+            function () { Lampa.Noty.show('Не удалось отозвать ссылки Infuse'); });
+        } });
       if (Lampa.Platform.is('apple_tv') === true) {
         var icon = Lampa.Head.addIcon('<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-6"><path stroke-linecap="round" stroke-linejoin="round" d="m18.375 12.739-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.552 18.32m.009-.01-.01.01m5.699-9.941-7.81 7.81a1.5 1.5 0 0 0 2.112 2.13" /></svg>', function () {
           window.open('lampa://showadvancedmenu');
