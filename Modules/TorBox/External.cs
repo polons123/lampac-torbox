@@ -16,6 +16,7 @@ public partial class TorBoxController
     class ExternalPlaylist {
         public SeriesSession State;
         public string Access, Uid, ClientKey;
+        public string SourceUrl, Filename;
         public int Selected;
         public volatile bool Ready;
         public bool ServerMode;
@@ -33,13 +34,14 @@ public partial class TorBoxController
             var data=JObject.Parse(System.IO.File.ReadAllText(externalPath));
             var loaded=data.Properties().Select(p=>(Hash:p.Name,Playlist:p.Value.ToObject<ExternalPlaylist>())).ToArray();
             if(loaded.Any(x=>!System.Text.RegularExpressions.Regex.IsMatch(x.Hash,"^[A-F0-9]{64}$") ||
-                string.IsNullOrEmpty(x.Playlist?.Uid) || x.Playlist.State?.Episodes==null ||
-                x.Playlist.State.Episodes.Count==0 || x.Playlist.State.Episodes.Any(e=>e.Pick?.Id==null)))
+                string.IsNullOrEmpty(x.Playlist?.Uid) || (x.Playlist.SourceUrl!=null
+                    ? !NamedTarget(x.Playlist.SourceUrl) || string.IsNullOrEmpty(x.Playlist.Filename)
+                    : x.Playlist.State?.Episodes==null || x.Playlist.State.Episodes.Count==0 || x.Playlist.State.Episodes.Any(e=>e.Pick?.Id==null))))
                 throw new InvalidDataException();
             foreach(var row in loaded) {
                 // Json.NET represents a stored null JToken as JValue.Null, not a null reference.
-                if(row.Playlist.State.Audio?.Type==JTokenType.Null)row.Playlist.State.Audio=null;
-                if(row.Playlist.State.Subtitle?.Type==JTokenType.Null)row.Playlist.State.Subtitle=null;
+                if(row.Playlist.State?.Audio?.Type==JTokenType.Null)row.Playlist.State.Audio=null;
+                if(row.Playlist.State?.Subtitle?.Type==JTokenType.Null)row.Playlist.State.Subtitle=null;
                 externalPlaylists[row.Hash]=row.Playlist;
             }
         }
@@ -48,7 +50,9 @@ public partial class TorBoxController
         catch { throw new TorBoxException(503,"Не удалось прочитать сохранённые внешние плейлисты"); }
         externalLoaded=true;
     }
-    static JObject StoredExternal(ExternalPlaylist p) => JObject.FromObject(new {
+    static JObject StoredExternal(ExternalPlaylist p) => p.SourceUrl!=null
+        ? JObject.FromObject(new { p.Uid,p.SourceUrl,p.Filename,Ready=true })
+        : JObject.FromObject(new {
         p.Uid,p.ClientKey,p.ServerMode,p.Selected,Ready=true,
         State=new { p.State.Owner,p.State.Title,p.State.Selection,p.State.KeyHash,p.State.FollowId,
             p.State.Resolution,p.State.Audio,p.State.Subtitle,
@@ -109,7 +113,7 @@ public partial class TorBoxController
             }finally{source.Gate.Release();}
         } else {
             external=GetExternal(input.preparation);
-            if(external.State.Owner!=metadataOwner || external.State.KeyHash!=SeriesKeyHash(key) || external.Uid!=requestInfo.user_uid || external.ServerMode!=serverCredentials)
+            if(external.State==null || external.State.Owner!=metadataOwner || external.State.KeyHash!=SeriesKeyHash(key) || external.Uid!=requestInfo.user_uid || external.ServerMode!=serverCredentials)
                 return Error(403,"Плейлист принадлежит другому аккаунту");
         }
         if(!await external.State.Gate.WaitAsync(TimeSpan.FromSeconds(2),HttpContext.RequestAborted))return Error(429,"Плейлист ещё подготавливается");
@@ -127,6 +131,51 @@ public partial class TorBoxController
                     url=host+"/torbox/series/external/"+external.Access+"/"+i+".m3u8"}).ToArray()});
         }finally{external.State.Gate.Release();}
     });
+    public class NamedInput { public NamedLink[] links {get;set;} }
+    public class NamedLink { public string url {get;set;} public string filename {get;set;} }
+    static bool NamedTarget(string value) => value!=null && value.Length<=8192 &&
+        !value.Any(char.IsControl) && Uri.TryCreate(value,UriKind.Absolute,out var uri) &&
+        (uri.Scheme=="http" || uri.Scheme=="https") && string.IsNullOrEmpty(uri.UserInfo);
+    // Shared InfuseSaver uses this for any provider; the server only redirects, never fetches URLs.
+    [HttpPost,Route("torbox/infuse/named"),RequestSizeLimit(2097152)]
+    public Task<ActionResult> PrepareNamedInfuse([FromBody] NamedInput input) => Guard((c,key)=>{
+        if(!externalPlaylistsAllowed)return Task.FromResult(Error(403,"Внешние плейлисты отключены администратором"));
+        if(input?.links==null || input.links.Length==0 || input.links.Length>5000 || input.links.Any(x=>x==null ||
+            !NamedTarget(x.url) || string.IsNullOrWhiteSpace(x.filename) || x.filename.Length>512))
+            return Task.FromResult(Error(400,"Некорректные ссылки Infuse"));
+        var created=input.links.Select(x=>new ExternalPlaylist {
+            Access=Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant(),Uid=requestInfo.user_uid,
+            SourceUrl=x.url,Filename=System.Text.RegularExpressions.Regex.Replace(x.filename,@"[\\/:*?""<>|\x00-\x1f\x7f]","_").Trim(),Ready=true
+        }).ToArray();
+        if(created.Any(p=>p.Filename=="." || p.Filename==".."))return Task.FromResult(Error(400,"Некорректное имя файла"));
+        lock(externalGate) {
+            LoadExternal();
+            var data=ExternalSnapshot();
+            foreach(var p in created)data[ExternalHash(p.Access)]=StoredExternal(p);
+            WriteExternal(data);
+            foreach(var p in created)externalPlaylists[ExternalHash(p.Access)]=p;
+        }
+        return Task.FromResult(Payload(new{success=true,links=created.Select(p=>new {
+            url=host+"/torbox/series/external/"+p.Access+"/file/"+Uri.EscapeDataString(p.Filename),filename=p.Filename
+        }).ToArray()}));
+    });
+    [HttpGet,HttpHead,AllowAnonymous,Route("torbox/series/external/{access}/file/{filename}")]
+    public ActionResult NamedInfuseStream(string access,string filename) {
+        Response.Headers["Cache-Control"]="no-store";
+        Response.Headers["Referrer-Policy"]="no-referrer";
+        try {
+            var p=GetExternal(access);
+            if(p.SourceUrl==null || p.Filename!=filename)return Error(404,"Ссылка отсутствует");
+            var c=Config();
+            if(!externalPlaylistsAllowed || (serverCredentials &&
+                (c["allowed_uids"] as JArray)?.Any(x=>string.Equals((string)x,p.Uid,StringComparison.OrdinalIgnoreCase))!=true))
+                return Error(403,"Нет доступа к внешней ссылке");
+            if(p.Revoked)return Error(410,"Ссылка отозвана");
+            return Redirect(p.SourceUrl);
+        }
+        catch(TorBoxException ex){return Error(ex.Status,ex.Message);}
+        catch{return Error(503,"Не удалось открыть сохранённую ссылку");}
+    }
     // Authenticated account-wide revocation also works after changing a personal key.
     [HttpPost,Route("torbox/series/external/revoke"),RequestSizeLimit(4096)]
     public Task<ActionResult> RevokeExternal() => Guard((c,key)=>{
@@ -151,6 +200,7 @@ public partial class TorBoxController
         Response.Headers["Referrer-Policy"]="no-referrer";
         try {
             var external=GetExternal(access);
+            if(external.State==null)return Error(404,"Серия отсутствует в плейлисте");
             if(!external.Ready)return Error(409,"Плейлист ещё подготавливается");
             if(index<0 || index>=external.State.Episodes.Count)return Error(404,"Серия отсутствует в плейлисте");
             var c=Config(external.ServerMode ? "file" : "client");

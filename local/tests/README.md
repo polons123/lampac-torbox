@@ -51,3 +51,8 @@ Fresh-process checks cover durable server/client playlists, playback with the sa
 URL after restart, private file modes, fresh stream URLs, durable revocation and
 failed writes/corrupt stores without silent data loss.
 The HTTP fixture explicitly enables external playlists for its playback checks.
+
+`node local/tests/infuse_names.cjs` checks named series URLs in the shared saver,
+single/bulk handoff, signed-target preservation, pending/error/profile guards
+and unchanged movie handoff. The backend and HTTP checks also cover named-link
+persistence, exact redirect targets, policy/UID guards and durable manual revoke.

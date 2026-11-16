@@ -224,6 +224,8 @@ def external_relay(url):
         with urllib.request.build_opener(NoRedirect).open(url, timeout=20) as response:
             return response.status, response.headers.get('Location')
     except urllib.error.HTTPError as exc:
+        if exc.code == 400:
+            print('Bad-request fixture response:', exc.read().decode(errors='replace')[:600], flush=True)
         return exc.code, exc.headers.get('Location')
 
 checks = []
@@ -351,15 +353,26 @@ try:
     code, external = api("/torbox/series/external", {"session": session, "index": 0})
     check("external playlist cannot bypass ambiguity", code == 200 and [x["episode"] for x in external["playlist"]] == [1])
     external_url = external["playlist"][0]["url"]
+    named_filename = 'Mock Show (2020) S01E01 - Часть & #1.mkv'
+    named_source = 'https://media.example/uuid?token=named-fixture&x=1%2F2'
+    code, named = api('/torbox/infuse/named', {'links': [{'url': named_source, 'filename': named_filename}]})
+    check('named Infuse URL carries the encoded episode name', code == 200 and urllib.parse.unquote(named['links'][0]['url'].rsplit('/', 1)[1]) == named_filename)
+    named_url = named['links'][0]['url']
+    named_redirect = external_relay(named_url)
+    if named_redirect != (302, named_source):
+        print('Named redirect fixture result:', named_redirect, flush=True)
+    check('named Infuse redirect preserves signed target', named_redirect == (302, named_source))
     check("external playlist is saved privately on disk", (p / 'database/torbox-external.json').stat().st_mode & 0o777 == 0o600)
     stop()
     start()
     check("same anonymous external URL works after Lampac restart", external_relay(external_url) == (302, 'https://media.example/10/1.m3u8'))
+    check('same named Infuse URL works after Lampac restart', external_relay(named_url) == (302, named_source))
     check("other account cannot revoke a saved external link", api('/torbox/series/external/revoke', {}, identity=second)[1]['revoked'] == 0 and external_relay(external_url)[0] == 302)
-    check("owner revokes saved external playlist", api('/torbox/series/external/revoke', {})[1]['revoked'] == 1)
+    check("owner revokes saved external and named Infuse links", api('/torbox/series/external/revoke', {})[1]['revoked'] == 2)
     stop()
     start()
     check("external revocation survives another Lampac restart", external_relay(external_url)[0] == 410)
+    check('named Infuse revocation survives another Lampac restart', external_relay(named_url)[0] == 410)
     check("forget rejects another account", api("/torbox/series/forget", {"id": watch}, identity=second)[0] == 404)
     check("forget succeeds for owner", api("/torbox/series/forget", {"id": watch})[0] == 200)
     inventory = [q for q in state["mylist"] if q.get("limit") == ["1000"]]

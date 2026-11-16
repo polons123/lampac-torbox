@@ -264,6 +264,15 @@
     }); });
     function fail(message, error) { if (!silent) Lampa.Noty.show(message); if (failed) failed(message, error); }
   }
+  // Shared saver: preserve series filenames in the actual URL for Infuse iCloud sync.
+  window.lampac_infuse_named_links = function (links, done, failed) {
+    var identity = keyIdentity();
+    request('infuse/named', { links: links }, function (j) {
+      if (identity !== keyIdentity()) return failed();
+      if (!Array.isArray(j.links) || j.links.length !== links.length) return failed();
+      done(j.links);
+    }, failed);
+  };
   function size(n) {
     n = Number(n) || 0;
     var units = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'];

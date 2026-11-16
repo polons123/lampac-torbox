@@ -12,6 +12,9 @@ public class ModInit : IModuleLoaded, IModuleOnline
     {
         return new List<ModuleOnlineItem> { new(new BaseSettings { plugin = "TorBox", enable = true, enabled = true, displayname = "TorBox", displayindex = 552 }, "torbox", "TorBox") };
     }
-    public void Loaded(InitspaceModel initspace) { }
+    public void Loaded(InitspaceModel initspace) {
+        // Named Infuse URLs contain decoded spaces/Unicode; tokens and filenames are checked by the controller.
+        CoreInit.BaseModPathWhiteList.Add("/torbox/series/external/");
+    }
     public void Dispose() { }
 }

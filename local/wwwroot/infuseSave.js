@@ -817,12 +817,26 @@
     // Direct, documented Infuse API on every platform, Apple TV included.
     // The tvOS Lampa bridge (lampa://saveAllToInfuse) drops the filename, so a
     // directly opened infuse:// save is the only path that keeps it.
+    var namedSavePending = false;
     function sendPreparedLinks(preparedLinks) {
-      // Other clients use the documented Infuse URL scheme directly.
-      var params = preparedLinks.map(function (item) {
-        return 'url=' + encodeURIComponent(item.url) + '&filename=' + encodeURIComponent(item.filename);
-      }).join('&');
-      window.location.assign('infuse://x-callback-url/save?' + params);
+      function launch(links) {
+        var params = links.map(function (item) {
+          return 'url=' + encodeURIComponent(item.url) + '&filename=' + encodeURIComponent(item.filename);
+        }).join('&');
+        window.location.assign('infuse://x-callback-url/save?' + params);
+      }
+      // iCloud can lose the separate filename. Carry episode names in the saved URL too.
+      var series = preparedLinks.some(function (item) { return /\bS\d{2}E\d{2,3}\b/i.test(item.filename); });
+      if (!series || !window.lampac_infuse_named_links) return launch(preparedLinks);
+      if (namedSavePending) return;
+      namedSavePending = true;
+      window.lampac_infuse_named_links(preparedLinks, function (links) {
+        namedSavePending = false;
+        launch(links);
+      }, function () {
+        namedSavePending = false;
+        Lampa.Noty.show('Не удалось подготовить имена ссылок Infuse. Повторите сохранение');
+      });
     }
     function addBulkSaveAction(data) {
       var links = data.items || [];

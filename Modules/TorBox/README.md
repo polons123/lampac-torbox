@@ -71,6 +71,17 @@ Already delivered TorBox stream URLs and playback in progress cannot be revoked
 through Lampac. There is no limit on the number of saved external playlists.
 The 5000-episode limit per playlist and saved series position behavior remain.
 
+The shared Infuse saver also uses this durable store for series names: it asks
+`POST /torbox/infuse/named` to wrap its prepared links before launching Infuse.
+Each returned URL ends with the episode filename so Infuse can retain the name
+across iCloud sync. This works with links from any saver source when the TorBox
+integration is loaded and the account/external-link policy permits it. Movies
+keep their existing direct handoff. The wrapper redirects without fetching media
+and keeps the exact original signed URL privately on disk. It does not extend
+the original provider URL's lifetime. The existing manual revoke button covers
+both these named links and external-player playlists. Previously saved Infuse
+entries must be saved again. Reload Lampa to load both updated client scripts.
+
 JSON responses through the module guard and external relay responses send
 `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. External players
 may not honor browser policies. This module-only update does not redact Core,

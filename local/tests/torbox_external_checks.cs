@@ -66,7 +66,7 @@ public partial class TorBoxController
             ?? throw new Exception("Cannot install offline HTTP handler");
         handler.SetValue(client,mock);handler.SetValue(publicClient,mock);
         if(args.Length>0)await PersistenceChecks(args[0],args[1]=="client",mock);
-        else await ExternalChecks(mock);
+        else { await ExternalChecks(mock);await NamedChecks(); }
         Console.WriteLine($"TorBox external playlists: {checks} checks passed (offline).");
     }
 
@@ -174,6 +174,37 @@ public partial class TorBoxController
 
     }
 
+    const string namedFile="Infuse Sync Test (2026) S01E01 - Name.mkv";
+    const string namedSource="https://cdn.example/uuid?token=private-signed-fixture&x=2";
+    static async Task NamedChecks() {
+        IOFile.Delete(externalPath);externalPlaylists.Clear();externalLoaded=false;
+        Policy(external:true);
+        var input=new NamedInput{links=new[]{new NamedLink{url=namedSource,filename=namedFile}}};
+        Check("anonymous named creation denied",Result(await Controller(anonymous:true).PrepareNamedInfuse(input)).Status==403);
+        Policy(external:false);
+        Check("named creation obeys external policy",Result(await Controller().PrepareNamedInfuse(input)).Status==403);
+        Policy(external:true);
+        foreach(var url in new[]{"file:///etc/passwd","javascript:alert(1)","https://user:pass@example.com/video","https://example.com/\r\nX-Test:a"}) {
+            Check("invalid named target rejected",Result(await Controller().PrepareNamedInfuse(new NamedInput{links=new[]{new NamedLink{url=url,filename=namedFile}}})).Status==400);
+        }
+        var result=Result(await Controller().PrepareNamedInfuse(input));
+        string urlResult=(string)result.Json["links"][0]["url"],access=urlResult.Split('/')[6];
+        Check("named URL contains encoded filename, no source credentials",result.Status==200 && Uri.UnescapeDataString(urlResult.Split('/').Last())==namedFile && !urlResult.Contains("private-signed"));
+        var relay=Controller(anonymous:true);
+        Check("named relay preserves exact signed source URL",(relay.NamedInfuseStream(access,namedFile) as RedirectResult)?.Url==namedSource);
+        Check("named relay suppresses cache and referrers",relay.Response.Headers["Cache-Control"]=="no-store" && relay.Response.Headers["Referrer-Policy"]=="no-referrer");
+        Check("named filename cannot be substituted",Result(await Task.FromResult(Controller().NamedInfuseStream(access,"Other.mkv"))).Status==404);
+        Check("named ticket cannot be used as a series",Result(await Controller().ExternalSeriesStream(access,0)).Status==404);
+        Check("named ticket cannot be used as series preparation",Result(await Controller().PrepareExternal(new ExternalInput{index=0,preparation=access})).Status==403);
+        var changed=JObject.Parse(IOFile.ReadAllText(configPath));changed["allowed_uids"]=new JArray("other");IOFile.WriteAllText(configPath,changed.ToString());
+        Check("named relay respects owner allowlist removal",Result(Controller().NamedInfuseStream(access,namedFile)).Status==403);
+        Policy(external:true);
+        var invalidBatch=new NamedInput{links=new[]{input.links[0],new NamedLink{url="file:///bad",filename=namedFile}}};
+        int count=externalPlaylists.Count;
+        Check("invalid named batch publishes no partial links",Result(await Controller().PrepareNamedInfuse(invalidBatch)).Status==400 && externalPlaylists.Count==count);
+        await Controller().RevokeExternal();
+        Check("manual revoke includes named links",Result(Controller(anonymous:true).NamedInfuseStream(access,namedFile)).Status==410);
+    }
     static async Task PersistenceChecks(string phase,bool clientMode,MockHttp mock) {
         if(phase=="seed") {
             Policy(clientMode,external:true);
@@ -188,14 +219,19 @@ public partial class TorBoxController
             Check("playlist persisted before successful response",result.Status==200 && IOFile.Exists(externalPath));
             string access=((string)result.Json["playlist"][0]["url"]).Split('/')[6];
             IOFile.WriteAllText("fixture-access",access);
+            var named=Result(await Controller(key:clientMode?testKey:null).PrepareNamedInfuse(new NamedInput{links=new[]{new NamedLink{url=namedSource,filename=namedFile}}}));
+            Check("named link is persisted before successful response",named.Status==200);
+            IOFile.WriteAllText("fixture-named-access",((string)named.Json["links"][0]["url"]).Split('/')[6]);
             string saved=IOFile.ReadAllText(externalPath);
             Check("store omits raw bearer tokens and transient upstream URLs",!saved.Contains(access) && !saved.Contains("private-passkey") && !saved.Contains("old-private-stream"));
             Check("server credentials never copied into playlist store",clientMode || !saved.Contains(testKey));
             Check("playlist store is private",IOFile.GetUnixFileMode(externalPath)==(System.IO.UnixFileMode.UserRead|System.IO.UnixFileMode.UserWrite));
         } else {
             string access=IOFile.ReadAllText("fixture-access");
+            string namedAccess=IOFile.ReadAllText("fixture-named-access");
             if(phase=="restore") {
                 var c=Controller(anonymous:true);var saved=c.GetExternal(access);
+                Check("named link restores across a fresh process",(c.NamedInfuseStream(namedAccess,namedFile) as RedirectResult)?.Url==namedSource);
                 Check("new process restores selected playback settings",saved.Ready && saved.State.Resolution==720 && saved.State.Selection=="Saved playback choice" && saved.State.FollowId=="offline-follow" && saved.State.Episodes[0].Numbered);
                 Check("new process restores client credentials when required",saved.ClientKey==(clientMode?testKey:null));
                 Check("temporary metadata and stream cache are regenerated",saved.Streams.IsEmpty && saved.State.Episodes[0].Metadata==null);
@@ -210,9 +246,10 @@ public partial class TorBoxController
                 Check("failed revocation is not reported as successful",Result(await Controller(key:clientMode?testKey:null).RevokeExternal()).Status==503 && !saved.Revoked);
                 System.IO.Directory.Delete(externalPath);IOFile.WriteAllText(externalPath,original);
                 var revoked=Result(await Controller(key:clientMode?"changed-offline-placeholder-key":null).RevokeExternal());
-                Check("restored playlist can be durably revoked with policy disabled",revoked.Status==200 && (int?)revoked.Json["revoked"]==1);
+                Check("restored playlist and named link revoke together with policy disabled",revoked.Status==200 && (int?)revoked.Json["revoked"]==2);
             } else {
                 Check("revocation survives another fresh process",Result(await Controller(anonymous:true).ExternalSeriesStream(access,0)).Status==410);
+                Check("named revocation survives another fresh process",Result(Controller(anonymous:true).NamedInfuseStream(namedAccess,namedFile)).Status==410);
                 Check("revocation removes credentials from disk",!IOFile.ReadAllText(externalPath).Contains(testKey));
             }
         }
