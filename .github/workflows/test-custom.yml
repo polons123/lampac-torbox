@@ -64,7 +64,9 @@ jobs:
           PY
       - name: Build and verify the runtime for this commit
         run: |
-          LAMPAC_BUILD_CACHE="$RUNNER_TEMP/lampac-public/cache" bash local/build-release.sh "$(cat local/base)"
+          base="$(cat local/base)"
+          git fetch --no-tags https://github.com/lampac-nextgen/lampac.git "refs/tags/$base:refs/tags/$base"
+          LAMPAC_BUILD_CACHE="$RUNNER_TEMP/lampac-public/cache" bash local/build-release.sh "$base"
           python3 - <<'PY'
           import os, pathlib, zipfile
           root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'lampac-public' / 'runtime'
