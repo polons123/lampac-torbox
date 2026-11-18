@@ -45,6 +45,38 @@
           en: 'File name',
           uk: 'Назва файла'
         },
+        its_apply_template: {
+          ru: 'Применить как шаблон',
+          en: 'Apply as template',
+          uk: 'Застосувати як шаблон'
+        },
+        its_template_example: {
+          ru: 'Введите имя серии в формате «Название S01E03»',
+          en: 'Enter an episode name in the format “Show S01E03”',
+          uk: 'Введіть назву серії у форматі «Назва S01E03»'
+        },
+        its_template_known: {
+          ru: 'Применить к сериям с известными номерами',
+          en: 'Apply to episodes with known numbers',
+          uk: 'Застосувати до серій із відомими номерами'
+        },
+        its_template_pattern: {
+          ru: 'Указать шаблон исходных имён',
+          en: 'Set the source filename pattern',
+          uk: 'Вказати шаблон початкових назв'
+        },
+        its_template_source: {
+          ru: 'Шаблон исходного имени: {season} и {episode}',
+          en: 'Source filename pattern: {season} and {episode}',
+          uk: 'Шаблон початкової назви: {season} і {episode}'
+        },
+        its_template_bad_source: {
+          ru: 'Шаблон должен совпадать с исходным именем этой серии',
+          en: 'The pattern must match the source name of this episode',
+          uk: 'Шаблон має збігатися з початковою назвою цієї серії'
+        },
+        its_template_updated: { ru: 'Переименовано по шаблону', en: 'Renamed from template', uk: 'Перейменовано за шаблоном' },
+        its_template_skipped: { ru: 'Без изменений', en: 'Unchanged', uk: 'Без змін' },
         its_edit_name: {
           ru: 'Редактировать название',
           en: 'Edit name',
@@ -178,13 +210,32 @@
       }
       return null;
     }
+    function episodeFromFilename(item) {
+      var raw = getFileMeta(infuseSourceName(item)).name;
+      var legacy = raw.match(/(^|[^a-z0-9])S(\d{1,2})[ ._-]*\(\s*(\d{1,3})[ ._-]+(?:seriya|серия)\s*\)/i);
+      var match = legacy || raw.match(/(^|[^a-z0-9])(?:S(\d{1,2})[ ._-]*E(\d{1,3})|(\d{1,2})x(\d{1,3}))(?!\d)/i);
+      if (!match) return null;
+      return {
+        season: Number(match[2] || match[4]),
+        episode: Number(match[3] || match[5]),
+        title: raw.slice(0, match.index + match[1].length).replace(/[._]+/g, ' ').replace(/[ -]+$/, '').trim(),
+        legacy: !!legacy
+      };
+    }
     function infuseEpisode(item) {
+      var named = episodeFromFilename(item);
+      // File coordinates override ordinal guesses from legacy season packs.
+      if (named && named.legacy && named.episode > 0) return named;
       var season = parseInt(item.season !== undefined ? item.season : item.season_number, 10);
       var episode = parseInt(item.episode !== undefined ? item.episode : item.episode_number, 10);
       if (season >= 0 && episode > 0) return { season: season, episode: episode };
-      var match = String(infuseSourceName(item)).match(/(?:^|[^a-z0-9])S(\d{1,2})[ ._-]*E(\d{1,3})(?!\d)|(?:^|[^a-z0-9])(\d{1,2})x(\d{1,3})(?!\d)/i);
-      if (match) return { season: parseInt(match[1] || match[3], 10), episode: parseInt(match[2] || match[4], 10) };
-      return null;
+      return named && named.episode > 0 ? named : null;
+    }
+    function infuseItemCard(item, movie) {
+      if (isInfuseSeries(movie) && infuseSeriesTitle(movie)) return movie;
+      var episode = episodeFromFilename(item);
+      if (!episode || !episode.title || episode.episode < 1) return movie;
+      return { media_type: 'tv', original_name: episode.title, name: episode.title };
     }
     function infuseEpisodeTitle(item) {
       var explicit = item.episode_title || item.episode_name;
@@ -296,8 +347,11 @@
         var prepared = prepareInfuseItem(item, movie, index);
         var meta = getFileMeta(prepared.filename);
         var editedName = meta.name;
-        var coordinates = isInfuseSeries(movie) ? infuseEpisode(item) : null;
+        var card = infuseItemCard(item, movie);
+        var coordinates = isInfuseSeries(card) ? infuseEpisode(item) : null;
         return {
+          source: item,
+          movie: card,
           id: index,
           index: index + 1,
           sourceIndex: index,
@@ -313,13 +367,70 @@
         };
       });
     }
+    function normalizeEditableLinks(links, movie) {
+      links.forEach(function (item, index) {
+        var source = Object.assign({}, item.source);
+        delete source.infuse_name;
+        var prepared = prepareInfuseItem(source, movie, index);
+        item.editedName = getFileMeta(prepared.filename).name;
+        item.templateApplied = false;
+        var coordinates = infuseEpisode(source);
+        item.seasonKey = coordinates && coordinates.season > 0 ? String(coordinates.season) : resolveSeasonKey(source);
+      });
+    }
+    function sourcePath(item) {
+      var name = infuseSourceName(item);
+      try { name = new URL(name).pathname.replace(/^\//, ''); } catch (e) {}
+      return safeDecode(name).replace(/\\/g, '/');
+    }
+    function sourceEpisodePattern(mask, reference) {
+      if (!mask || mask.length > 512 || (mask.match(/\*/g) || []).length > 2) return null;
+      var tokens = mask.match(/\{season\}|\{episode\}/g) || [];
+      if (tokens.filter(function (token) { return token === '{episode}'; }).length !== 1 ||
+          tokens.filter(function (token) { return token === '{season}'; }).length > 1) return null;
+      var pattern = mask.split(/(\{season\}|\{episode\}|\*)/).map(function (part) {
+        if (part === '{season}') return '(\\d{1,2})';
+        if (part === '{episode}') return '(\\d{1,3})';
+        if (part === '*') return '[^/]*?';
+        return part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      }).join('');
+      var compiled = new RegExp('^' + pattern + '$', 'i');
+      return function (item) {
+        var name = sourcePath(item);
+        if (mask.indexOf('/') < 0) name = name.split('/').pop();
+        if (name.length > 512) return null;
+        var match = name.match(compiled);
+        if (!match) return null;
+        var seasonIndex = tokens.indexOf('{season}');
+        var known = infuseEpisode(item);
+        var season = seasonIndex < 0 ? (known ? known.season : reference.season) : Number(match[seasonIndex + 1]);
+        var episode = Number(match[tokens.indexOf('{episode}') + 1]);
+        return episode > 0 ? { season: season, episode: episode } : null;
+      };
+    }
+    function applyEpisodeTemplate(links, selected, template, matchSource) {
+      var renamed = 0, skipped = 0;
+      links.forEach(function (item) {
+        if (item === selected) return;
+        var episode = matchSource ? matchSource(item.source) : infuseEpisode(item.source);
+        if (!episode) { skipped++; return; }
+        item.editedName = template.title + ' S' + (episode.season < 10 ? '0' : '') + episode.season + 'E' +
+          (episode.episode < 10 ? '0' : '') + episode.episode;
+        item.seasonKey = episode.season > 0 ? String(episode.season) : 'none';
+        item.templateApplied = true;
+        renamed++;
+      });
+      selected.templateApplied = true;
+      selected.seasonKey = template.season > 0 ? String(template.season) : 'none';
+      return { renamed: renamed, skipped: skipped };
+    }
     function getPreparedLinks(editableLinks, movie) {
       return editableLinks.filter(function (item) {
         return item.enabled;
       }).map(function (item) {
         return {
           url: item.originalUrl,
-          filename: buildInfuseFilename(item.editedName, item.extension, movie)
+          filename: buildInfuseFilename(item.editedName, item.extension, item.templateApplied ? { media_type: 'tv' } : item.movie || movie)
         };
       });
     }
@@ -374,9 +485,9 @@
       titleNode.on('click', registerTap);
       titleNode.on('hover:long', activate);
     }
-    function openFileNameEditor(item, onDone) {
+    function openFileNameEditor(item, onDone, title) {
       if (!Lampa.Input || typeof Lampa.Input.edit !== 'function') {
-        var promptValue = window.prompt(tr('its_file_name_title'), item.editedName);
+        var promptValue = window.prompt(title || tr('its_file_name_title'), item.editedName);
         if (promptValue !== null && String(promptValue).trim()) {
           item.editedName = String(promptValue).trim();
         }
@@ -386,7 +497,7 @@
       var layer = $('.its-links-layer');
       layer.addClass('its-links-layer--hidden');
       Lampa.Input.edit({
-        title: tr('its_file_name_title'),
+        title: title || tr('its_file_name_title'),
         value: item.editedName,
         free: true,
         nosave: true,
@@ -484,6 +595,10 @@
         var stateClass = item.enabled ? 'its-links-editor__state--enabled' : 'its-links-editor__state--disabled';
         var seasonLabel = getSeasonLabelByKey(item.seasonKey);
         var row = $("\n            <div class=\"its-links-editor__item ".concat(item.enabled ? '' : 'is-disabled', "\">\n                <div class=\"its-links-editor__head\">\n                    <div class=\"its-links-editor__index\">#").concat(item.index, "</div>\n                    <div class=\"its-links-editor__season\">").concat(escapeHtml(seasonLabel), "</div>\n                    <div class=\"its-links-editor__filename\" title=\"").concat(escapeHtml(item.editedName + item.extension), "\"><span class=\"its-links-editor__name\">").concat(escapeHtml(item.editedName), "</span><span class=\"its-links-editor__ext\">").concat(escapeHtml(item.extension), "</span></div>\n                    <div class=\"its-links-editor__state ").concat(stateClass, "\">").concat(stateText, "</div>\n                </div>\n                <div class=\"its-links-editor__actions\">\n                    <div class=\"its-links-editor__action selector\" data-action=\"edit\" data-id=\"").concat(item.id, "\">").concat(tr('its_edit_name'), "</div>\n                    <div class=\"its-links-editor__action selector\" data-action=\"toggle\" data-id=\"").concat(item.id, "\">").concat(item.enabled ? tr('its_do_not_send') : tr('its_send'), "</div>\n                </div>\n            </div>\n        "));
+        if (state.links.length > 1) {
+          row.find('.its-links-editor__actions').append($('<div class="its-links-editor__action selector" data-action="template"></div>')
+            .attr('data-id', item.id).text(tr('its_apply_template')));
+        }
         list.append(row);
       });
       html.find('[data-action="save"]').on('hover:enter', actions.save);
@@ -497,6 +612,10 @@
           action: 'toggle',
           id: id
         });
+      });
+      html.find('[data-action="template"]').on('hover:enter', function () {
+        var id = Number($(this).attr('data-id'));
+        actions.template(id, { action: 'template', id: id });
       });
       html.find('[data-action="edit"]').on('hover:enter', function () {
         var id = Number($(this).attr('data-id'));
@@ -708,20 +827,7 @@
             config.onSave(links);
           },
           normalize: function normalize() {
-            state.links.forEach(function (item, index) {
-              var normalized = FileNameNormalizer.normalizeItem({
-                originalUrl: item.originalUrl,
-                url: item.originalUrl,
-                title: item.editedName,
-                season: item.season,
-                season_number: item.season_number,
-                episode: item.episode,
-                episode_number: item.episode_number
-              }, state.movie, index);
-              if (normalized) {
-                item.editedName = normalized;
-              }
-            });
+            normalizeEditableLinks(state.links, state.movie);
             _render({
               action: 'normalize'
             });
@@ -749,6 +855,46 @@
             }
             link.enabled = !link.enabled;
             _render(focusState);
+          },
+          template: function (id, focusState) {
+            var link = state.links.find(function (item) { return item.id === id; });
+            if (!link) return;
+            var template = episodeFromFilename({ name: link.editedName });
+            if (!template || !template.title || !template.episode || template.legacy) {
+              Lampa.Noty.show(tr('its_template_example'));
+              return;
+            }
+            function apply(matcher) {
+              var stats = applyEpisodeTemplate(state.links, link, template, matcher);
+              Lampa.Noty.show(tr('its_template_updated') + ' ' + stats.renamed + ' · ' + tr('its_template_skipped') + ' ' + stats.skipped);
+              _render(focusState);
+            }
+            setLayerVisible(false);
+            Lampa.Select.show({
+              title: tr('its_apply_template'),
+              items: [
+                { title: tr('its_template_known'), pattern: false },
+                { title: tr('its_template_pattern'), pattern: true }
+              ],
+              onBack: function () { setLayerVisible(true); focusSelector(focusState); },
+              onSelect: function (choice) {
+                Lampa.Select.hide();
+                if (!layer) return;
+                setLayerVisible(true);
+                if (!choice.pattern) return apply();
+                var mask = { editedName: sourcePath(link.source) };
+                openFileNameEditor(mask, function () {
+                  if (!layer) return;
+                  var matcher = sourceEpisodePattern(mask.editedName, template);
+                  var reference = matcher && matcher(link.source);
+                  if (!reference || reference.season !== template.season || reference.episode !== template.episode) {
+                    Lampa.Noty.show(tr('its_template_bad_source'));
+                    return _render(focusState);
+                  }
+                  apply(matcher);
+                }, tr('its_template_source'));
+              }
+            });
           },
           edit: function edit(id, focusState) {
             var link = state.links.find(function (item) {
@@ -797,6 +943,7 @@
       });
     }
     function prepareInfuseItem(item, movie, index) {
+      movie = infuseItemCard(item, movie);
       var source = item.infuse_name || infuseSourceName(item);
       var meta = getFileMeta(source);
       var name = meta.name;

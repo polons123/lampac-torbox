@@ -1,8 +1,10 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Newtonsoft.Json;
 using Shared;
 using Shared.Models.Base;
 using System;
+using System.IO;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -40,7 +42,8 @@ public class ConfirmController : BaseController
             return Html(Form(code, "Код не найден или истёк. Обновите код в приложении"), 404);
 
         ChallengeStore.ResetFails(ip);
-        Approve(item, 0, "web", user);
+        if (!TryApprove(item, 0, "web", user))
+            return Html(Form(code, "Не удалось сохранить вход. Попробуйте подтвердить код ещё раз."), 503);
         return Html(Layout("<h2>Готово</h2><p>Вход подтверждён. Вернитесь к приложению.</p>"));
     }
 
@@ -62,20 +65,29 @@ public class ConfirmController : BaseController
         if (!ChallengeStore.TryGet(body?.code, out var item))
             return StatusCode(404, new { error = "expired_token" });
 
-        Approve(item, body.days, body.device ?? "bot", body.user);
+        if (!TryApprove(item, body.days, body.device ?? "bot", body.user))
+            return StatusCode(503, new { error = "token_store_unavailable" });
         return Json(new { confirmed = true });
     }
 
-    static void Approve(ChallengeStore.Challenge item, int days, string device, string user)
+    static bool TryApprove(ChallengeStore.Challenge item, int days, string device, string user)
     {
         lock (item)
         {
             // повторное нажатие не выдаёт второй токен
             if (item.token != null)
-                return;
+                return true;
 
             var conf = ModInit.conf;
-            item.token = TokenStore.Issue(days > 0 ? days : conf.token_days, conf.group, device, user);
+            try
+            {
+                item.token = TokenStore.Issue(days > 0 ? days : conf.token_days, conf.group, device, user);
+                return true;
+            }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or JsonException)
+            {
+                return false;
+            }
         }
     }
 

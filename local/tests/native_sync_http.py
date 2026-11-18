@@ -156,6 +156,20 @@ def main():
         check("rapid polling is rate limited", a.request("/nativeappletv/auth/poll", {"code": code})[0] == 429)
         check("wrong admin password cannot confirm a challenge", a.request("/nativeappletv/confirm", form={"code": code, "passwd": "wrong-fixture"})[0] == 401)
         check("bot confirmation requires the configured secret", a.request("/nativeappletv/bot/confirm", {"code": code}, headers={"X-Bot-Secret": "wrong-fixture"})[0] == 401)
+        users = a.root / "users.json"
+        original_users = users.read_bytes() if users.exists() else None
+        users.write_bytes(b"invalid user store")
+        pending = a.request("/nativeappletv/auth/start", {})[1]["code"]
+        form = {"code": pending, "passwd": "fixture-admin-password", "user": VIEWER}
+        check("web confirmation fails when the user store is corrupt", a.request("/nativeappletv/confirm", form=form)[0] == 503)
+        status, error = a.request("/nativeappletv/bot/confirm", {"code": pending, "user": VIEWER}, headers={"X-Bot-Secret": "fixture-bot-secret"})
+        check("bot confirmation surfaces the storage error", status == 503 and error["error"] == "token_store_unavailable")
+        check("failed confirmation preserves the file and issues no in-memory token", users.read_bytes() == b"invalid user store" and a.request("/nativeappletv/auth/poll", {"code": pending})[1]["status"] == "pending")
+        if original_users is None:
+            users.unlink()
+        else:
+            users.write_bytes(original_users)
+        check("same code can be confirmed once the store recovers", a.request("/nativeappletv/confirm", form=form)[0] == 200)
         first, used_code = a.issue()
         second, _ = a.issue(" " + VIEWER.upper() + " ", method="bot")
         check("web and bot confirmation issue distinct tokens", first != second and len(first) == len(second) == 32)

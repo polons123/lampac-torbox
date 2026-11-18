@@ -59,7 +59,7 @@ public class ModInit : IModuleLoaded, IModuleConfigure
             limit_map = new List<WafLimitRootMap>
             {
                 new("^/lite/", new WafLimitMap { limit = 10, second = 1 }),
-                new("^/(externalids|lifeevents)", new WafLimitMap { limit = 10, second = 1 })
+                new("^/(externalids|lifeevents|kino/poster)", new WafLimitMap { limit = 10, second = 1 })
             }
         });
     }

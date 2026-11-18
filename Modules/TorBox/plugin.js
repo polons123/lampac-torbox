@@ -399,7 +399,12 @@
     text = text.replace(/\[[^\]]*\]/g, ' ').replace(/\([^)]*\)/g, ' ')
       .split(/\bS\d{1,2}(?:E\d{1,3})?\b|\b(?:2160p|1080p|720p|480p|4K|WEB[- .]?DL|WEBRip|BluRay|BDRip|REMUX|HDRip|HEVC|x26[45]|H26[45]|сезон|season)\b/i)[0]
       .replace(/[._]/g, ' ').replace(/\s+/g, ' ').replace(/^[\s\-(/]+|[\s\-(/]+$/g, '');
-    return { titles: text.split(/\s*\/\s*|\s+\|\s+|\s+aka\s+/i).filter(function (v) { return v.length > 1; }), year: year ? year[1] : '', type: serial ? 'tv' : 'movie' };
+    var titles = text.split(/\s*\/\s*|\s+\|\s+|\s+aka\s+/i).filter(function (v) { return v.length > 1; });
+    if (titles.length === 1) {
+      var bilingual = /^(?:(.*[а-яё])\s+([a-z][a-z0-9 .:'-]*)|([a-z][a-z0-9 .:'-]*)\s+([а-яё][а-яё0-9 .:'-]*))$/i.exec(titles[0]);
+      if (bilingual) titles = [bilingual[1] || bilingual[3], bilingual[2] || bilingual[4], titles[0]];
+    }
+    return { titles: titles, year: year ? year[1] : '', type: serial ? 'tv' : 'movie' };
   }
   function posterTitle(text) { return String(text || '').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9]/g, ''); }
   var posterQueue = [];
@@ -434,7 +439,7 @@
         release();
         waiting.forEach(function (done) { done(poster); });
       }
-      var queries = parsed.titles.slice(0, 2);
+      var queries = parsed.titles.slice(0, 3);
       var types = [parsed.type, parsed.type === 'tv' ? 'movie' : 'tv'];
       function search(index) {
         if (finished) return;
@@ -475,30 +480,57 @@
   }
   function clarifyFilm(torrent, done, back, valid) {
     var parsed = posterName(torrent.name);
-    Lampa.Input.edit({ title: 'Название фильма или сериала', value: torrent.film && torrent.film.title || parsed.titles[0] || '', free: true, nosave: true }, function (query) {
+    var suggested = torrent.film && torrent.film.title || parsed.titles[0] || '';
+    Lampa.Input.edit({ title: 'Название фильма или сериала', value: suggested, free: true, nosave: true }, function (value) {
       if (!valid()) return;
-      if (!String(query || '').trim()) return back();
-      Lampa.Noty.show('Ищу фильм…');
-      Lampa.Api.search({ query: encodeURIComponent(query.trim()), page: 1 }, function (json) {
+      var query = String(value || '').trim();
+      if (!query) return back();
+      Lampa.Noty.show('Ищу фильм или сериал…');
+      var queries = query === suggested && parsed.titles[1] && parsed.titles[1] !== query ? [query, parsed.titles[1]] : [query];
+      var preferred = torrent.film && torrent.film.media_type || parsed.type;
+      var found = [], seen = {}, pending = queries.length * 2, failures = 0, finished = false;
+      var timer = setTimeout(show, 12000);
+      function show() {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
         if (!valid()) return;
-        var found = [];
-        ['movie', 'tv'].forEach(function (type) {
-          ((json[type] || {}).results || []).slice(0, 20).forEach(function (movie) {
-            var film = filmFromCard(movie);
-            if (!film) return;
-            film.media_type = type;
-            found.push(film);
-          });
-        });
-        found.sort(function (a, b) { return Number(b.year === Number(parsed.year)) - Number(a.year === Number(parsed.year)); });
+        function score(film) {
+          var names = [film.title, film.original_title].map(posterTitle);
+          var exact = queries.some(function (title) { return names.indexOf(posterTitle(title)) !== -1; });
+          return (exact ? 4 : 0) + (film.media_type === preferred ? 2 : 0) + (film.year === Number(parsed.year) ? 1 : 0);
+        }
+        found.sort(function (a, b) { return score(b) - score(a); });
         var actions = found.map(function (film) {
           return { title: escaped(film.title) + (film.year ? ' (' + film.year + ')' : ''), subtitle: escaped(film.original_title) + ' · ' + (film.media_type === 'tv' ? 'Сериал' : 'Фильм'),
             run: function () {
+              if (!valid()) return;
               request('metadata', { id: torrent.id, film: film }, function () { if (valid()) done(); }, function () { if (valid()) back(); });
             } };
         });
-        actions.unshift({ title: found.length ? 'Изменить поиск' : 'Не найдено · изменить поиск', run: function () { clarifyFilm(torrent, done, back, valid); } });
-        choose('Выберите фильм', actions, back);
+        var retry = { title: found.length ? 'Изменить поиск' : failures || pending ? 'Ошибка поиска · повторить' : 'Не найдено · изменить поиск',
+          run: function () { clarifyFilm(torrent, done, back, valid); } };
+        actions.push(retry);
+        choose('Выберите фильм или сериал', actions, back);
+      }
+      [preferred, preferred === 'tv' ? 'movie' : 'tv'].forEach(function (type) {
+        queries.forEach(function (title) {
+          Lampa.Api.sources.tmdb.get('search/' + type, { query: encodeURIComponent(title), page: 1 }, function (json) {
+            if (finished) return;
+            var results = json && Array.isArray(json.results) ? json.results : [];
+            results.slice(0, 20).forEach(function (card) {
+              var film = filmFromCard(card);
+              if (!film || !film.tmdb_id || seen[type + ':' + film.tmdb_id]) return;
+              seen[type + ':' + film.tmdb_id] = true;
+              film.media_type = type;
+              found.push(film);
+            });
+            if (!--pending) show();
+          }, function () {
+            failures++;
+            if (!--pending) show();
+          });
+        });
       });
     });
   }
@@ -784,7 +816,7 @@
             }
           });
           if (t.ready) actions.push({ title: 'Сохранить в Infuse', run: function () { infuseItem(t.id, back, g); } });
-          actions.push({ title: 'Уточнить фильм', run: function () { clarifyFilm(t, reload, back, function () { return alive; }); } });
+          actions.push({ title: 'Уточнить фильм или сериал', run: function () { clarifyFilm(t, reload, back, function () { return alive && libraryIdentity === keyIdentity(); }); } });
           actions.push({ title: 'Удалить из TorBox', run: function () {
             var title = t.film && t.film.title || t.name;
             choose('Удалить «' + escaped(title) + '»?', [
@@ -1032,6 +1064,17 @@
     }
     return hash;
   }
+  function isJackettTorrent(torrent, indexers) {
+    var source = [torrent.Source, torrent.source, torrent.Provider, torrent.provider]
+      .filter(function (value) { return typeof value === 'string' && value.trim(); })
+      .map(function (value) { return value.trim().toLowerCase(); });
+    if (source.indexOf('jackett') !== -1) return true;
+    if (source.indexOf('jacred') !== -1 || source.indexOf('torbox') !== -1) return false;
+    if (torrent.TrackerId && indexers.indexOf(torrent.TrackerId) !== -1) return true;
+    return [torrent.Link, torrent.link].some(function (link) {
+      return typeof link === 'string' && /\/dl\/[^/?#]+\/?\?(?:[^#]*&)?jackett_apikey=/i.test(link);
+    });
+  }
   var torrentCacheInstalled = false, torrentCacheRetry = null;
   function installTorrentCache() {
     if (torrentCacheInstalled) return;
@@ -1158,7 +1201,7 @@
         if (!session.data || !session.only) return filter.apply(component, arguments);
         var original = session.data.Results;
         try {
-          session.data.Results = original.filter(function (t) { return stateFor(session, t) === true; });
+          session.data.Results = original.filter(function (t) { return !t.lampacJackett && stateFor(session, t) === true; });
           return filter.apply(component, arguments);
         } finally { session.data.Results = original; }
       };
@@ -1177,8 +1220,16 @@
           if (typeof args[2] === 'function') return args[2]('Некорректный ответ парсера');
           return done({ Results: [] });
         }
+        var jackettIndexers = data.jacred !== true && Array.isArray(data.Indexers) ? data.Indexers
+          .filter(function (indexer) { return indexer && typeof indexer.ID === 'string'; })
+          .map(function (indexer) { return indexer.ID; }) : [];
         var copy = $.extend({}, data, { Results: data.Results.filter(function (t) { return t && typeof t === 'object' && !Array.isArray(t); }).map(function (t) {
-          var row = $.extend({}, t); Object.defineProperty(row, 'lampacTorboxCache', { value: session }); return row;
+          var row = $.extend({}, t);
+          Object.defineProperties(row, {
+            lampacTorboxCache: { value: session },
+            lampacJackett: { value: isJackettTorrent(row, jackettIndexers) }
+          });
+          return row;
         }) });
         clearTimeout(session.retryTimer); session.checkGeneration = (session.checkGeneration || 0) + 1;
         session.data = copy; done(copy);

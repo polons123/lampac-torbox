@@ -1,6 +1,6 @@
 const fs = require('fs'), vm = require('vm'), assert = require('assert'), path = require('path');
 const source = fs.readFileSync(path.join(__dirname, '../wwwroot/infuseSave.js'), 'utf8')
-  .replace('    if (!window.plugin_its_ready)', '    window.testApi={sendPreparedLinks,addSingleSaveAction,addBulkSaveAction,createEditableLinks,getPreparedLinks,infuseRequest};\n    if (!window.plugin_its_ready)');
+  .replace('    if (!window.plugin_its_ready)', '    window.testApi={sendPreparedLinks,addSingleSaveAction,addBulkSaveAction,createEditableLinks,normalizeEditableLinks,episodeFromFilename,sourceEpisodePattern,applyEpisodeTemplate,getPreparedLinks,infuseRequest};\n    if (!window.plugin_its_ready)');
 const sent = [], requests = [], notices = [];
 let identity = 'profile-one';
 const context = { URL, console, document: {currentScript:{src:'https://lampac.example/infuseSave.js'}}, setTimeout: f => f(),
@@ -61,3 +61,64 @@ assert(!Object.keys(context.window).some(x => x.includes('torbox')), 'no TorBox 
 identity = 'profile-two';complete(last);assert.equal(sent.length, 6, 'profile switch cancels handoff');
 api.sendPreparedLinks(series);requests[8].done([]);assert.equal(sent.length, 6, 'incomplete response is rejected');
 console.log('PASS: independent Infuse named handoff without TorBox, profile/failure guards, single/bulk/editor and named movies');
+
+const fortitude = [];
+const expected = [];
+for (const [season, count, year] of [[1, 12, 2015], [2, 10, 2017], [3, 4, 2018]]) {
+  for (let episode = 1; episode <= count; episode++) {
+    const number = String(episode).padStart(2, '0');
+    const filename = `Fortitude.S0${season}.(${number}.seriya).${year}.WEB-DL.(720p).ExKinoRay.mkv`;
+    fortitude.push({ name: filename, url: original + '&file=' + fortitude.length });
+    expected.push(`Fortitude S0${season}E${number}.mkv`);
+  }
+}
+const fromTorBox = api.createEditableLinks(fortitude, null);
+fromTorBox[0].editedName = 'incorrect manual name';
+fromTorBox[1].enabled = false;
+api.normalizeEditableLinks(fromTorBox, null);
+assert.equal(fromTorBox[0].editedName, 'Fortitude S01E01');
+assert.equal(fromTorBox[1].enabled, false);
+fromTorBox[1].enabled = true;
+assert.deepEqual(Array.from(api.getPreparedLinks(fromTorBox, null), link => link.filename), expected);
+assert.deepEqual(Array.from(api.getPreparedLinks(fromTorBox, null), link => link.url), fortitude.map(file => file.url));
+
+const fromTorrServer = api.createEditableLinks([
+  { title: fortitude[14].name, url: original, season: 2, episode: 1 }
+], { id: 999, title: 'Incorrect movie match' });
+api.normalizeEditableLinks(fromTorrServer, null);
+assert.equal(api.getPreparedLinks(fromTorrServer, null)[0].filename, 'Fortitude S02E03.mkv');
+const confirmed = { media_type: 'tv', original_name: 'Fortitude', first_air_date: '2015-01-29' };
+const confirmedNames = api.createEditableLinks([fortitude[22]], confirmed);
+api.normalizeEditableLinks(confirmedNames, confirmed);
+assert.equal(api.getPreparedLinks(confirmedNames, confirmed)[0].filename, 'Fortitude (2015) S03E01.mkv');
+console.log('PASS: all 26 Fortitude files, normalization after manual edits, TorrServer, and first-air year');
+
+const legacy = api.createEditableLinks([
+  { name: 'Show/Disc 1/Track 03.mkv', url: original },
+  { name: 'Show/Disc 2/Track 07.mp4', url: original + '&second=1' },
+  { name: 'Show/Disc 2/Track 10.mkv', url: original + '&third=1' },
+  { name: 'Show/Disc 2/featurette.mkv', url: original + '&extra=1' }
+], { id: 55, title: 'Incorrect movie' });
+legacy[0].editedName = 'Correct Show (2015) S01E03';
+legacy[2].enabled = false;
+const template = api.episodeFromFilename({ name: legacy[0].editedName });
+const matcher = api.sourceEpisodePattern('Show/Disc {season}/Track {episode}.*', template);
+assert.equal(matcher(legacy[0].source).episode, 3);
+assert.equal(matcher(legacy[1].source).season, 2);
+assert.equal(api.sourceEpisodePattern('Track {episode}-{episode}.mkv', template), null);
+assert.equal(api.sourceEpisodePattern('Track {episode}.mkv', template)(legacy[1].source), null);
+const applied = api.applyEpisodeTemplate(legacy, legacy[0], template, matcher);
+assert.equal(applied.renamed, 2);
+assert.equal(applied.skipped, 1);
+assert.equal(legacy[2].enabled, false);
+assert.equal(legacy[2].editedName, 'Correct Show (2015) S02E10');
+assert.deepEqual(Array.from(api.getPreparedLinks(legacy, null).slice(0, 2), link => [link.filename, link.url]), [
+  ['Correct Show (2015) S01E03.mkv', original],
+  ['Correct Show (2015) S02E07.mp4', original + '&second=1']
+]);
+const sorted = api.createEditableLinks([fortitude[14], fortitude[0], fortitude[25]], null);
+sorted[0].editedName = 'Fortitude Custom S02E03 - Episode title';
+api.applyEpisodeTemplate(sorted, sorted[0], api.episodeFromFilename({ name: sorted[0].editedName }));
+assert.equal(sorted[1].editedName, 'Fortitude Custom S01E01');
+assert.equal(sorted[2].editedName, 'Fortitude Custom S03E04');
+console.log('PASS: edited episode template, source masks, multiple seasons, gaps, extensions and ignored extras');

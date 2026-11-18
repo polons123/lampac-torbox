@@ -34,13 +34,13 @@ public static class TokenStore
 
         lock (fileLock)
         {
-            var list = new List<AccsUser>();
-            bool fileOk = true;
-            if (File.Exists(UsersFileName))
+            List<AccsUser> list;
+            try
             {
-                try { list = JsonConvert.DeserializeObject<List<AccsUser>>(File.ReadAllText(UsersFileName)) ?? list; }
-                catch { fileOk = false; } // битый файл не затираем: выдаём токен только в память
+                list = JsonConvert.DeserializeObject<List<AccsUser>>(File.ReadAllText(UsersFileName))
+                    ?? throw new InvalidDataException("Missing user list");
             }
+            catch (FileNotFoundException) { list = new List<AccsUser>(); }
 
             AccsUser memUser = null;
             AccsUser fileUser = null;
@@ -66,21 +66,24 @@ public static class TokenStore
 
                 fileUser.ids ??= new List<string>();
                 fileUser.ids.Add(token);
-
-                if (memUser == null)
-                    memUser = fileUser;
-                else
-                    (memUser.ids ??= new List<string>()).Add(token);
             }
 
-            if (fileOk)
+            string tmp = UsersFileName + ".tmp-" + Guid.NewGuid().ToString("N");
+            try
             {
-                string tmp = UsersFileName + ".tmp";
-                File.WriteAllText(tmp, JsonConvert.SerializeObject(list, Formatting.Indented, new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore }));
+                using (var stream = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    using (var writer = new StreamWriter(stream, leaveOpen: true))
+                        writer.Write(JsonConvert.SerializeObject(list, Formatting.Indented, new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore }));
+                    stream.Flush(flushToDisk: true);
+                }
                 File.Move(tmp, UsersFileName, overwrite: true);
             }
+            finally { File.Delete(tmp); }
 
-            RegisterInMemory(memUser);
+            if (owner != null && memUser != null)
+                (memUser.ids ??= new List<string>()).Add(token);
+            RegisterInMemory(memUser ?? fileUser);
         }
 
         return token;

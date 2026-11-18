@@ -116,6 +116,7 @@ public class OnlineApiController : BaseController
                 .Replace("{invc-rch}", FileCache.ReadAllText("plugins/invc-rch.js", "invc-rch.js"))
                 .Replace("{invc-rch_nws}", FileCache.ReadAllText("plugins/invc-rch_nws.js", "invc-rch_nws.js"))
                 .Replace("{player-inner}", string.Empty)
+                .Replace("{kino_posters}", KinoApi.Enabled ? "enabled" : "disabled")
                 .Replace("{localhost}", host)
                 .Replace("{token}", HttpUtility.UrlEncode(token));
 
@@ -141,68 +142,61 @@ public class OnlineApiController : BaseController
     /// </summary>
     static ConcurrentDictionary<string, string> externalids = JsonConvert.DeserializeObject<ConcurrentDictionary<string, string>>(IO.File.ReadAllText("data/externalids.json"));
 
+    static IReadOnlyList<HeadersModel> AllohaHeaders() => HeadersModel.Init(
+            ("Authorization", "Bearer 04941a9a3ca3ac16e2b4327347bbc1"),
+            ("Accept", "application/json"));
+
+    async Task<string> GetAllohaImdb(long kinopoisk)
+    {
+        string cacheKey = $"externalids:KP_:{kinopoisk}";
+        if (hybridCache.TryGetValue(cacheKey, out string imdb))
+            return imdb;
+        await Http.GetSpan($"https://apbugall.org/v2/movies/search?kp={kinopoisk}", timeoutSeconds: 5, headers: AllohaHeaders(),
+            spanAction: json => imdb = Rx.Match(json, "\"id_imdb\":\"(tt[0-9]+)\""));
+        hybridCache.Set(cacheKey, imdb ?? "", DateTime.Now.AddHours(string.IsNullOrEmpty(imdb) ? 1 : 8));
+        return imdb;
+    }
+
+    [HttpGet]
+    [Route("kino/poster")]
+    async public Task<ActionResult> KinoPoster(string id, string imdb_id, long kinopoisk_id, int serial, long tmdb_id = 0, string source = null)
+    {
+        var ids = KinoIds(id, kinopoisk_id, tmdb_id, source);
+        string poster = KinoApi.Poster(await KinoApi.Title(ids.Tmdb, imdb_id, ids.Kp, serial == 1));
+        return Json(new { poster });
+    }
+
+    static (long Tmdb, long Kp) KinoIds(string id, long kinopoisk, long tmdb, string source)
+    {
+        if (id?.StartsWith("KP_", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            if (kinopoisk <= 0 && long.TryParse(id.AsSpan(3), out long kp) && kp > 0)
+                kinopoisk = kp;
+        }
+        else if (tmdb <= 0 && (source is null or "" or "tmdb" or "cub") && long.TryParse(id, out long parsed))
+        {
+            tmdb = parsed;
+        }
+
+        return (tmdb, kinopoisk);
+    }
+
     [HttpGet]
     [Route("externalids")]
-    async public Task<ActionResult> Externalids(string id, string imdb_id, long kinopoisk_id, int serial)
+    async public Task<ActionResult> Externalids(string id, string imdb_id, long kinopoisk_id, int serial, long tmdb_id = 0, string source = null)
     {
-        string memKey = $"OnlineApi:externalids:{id}:{imdb_id}:{kinopoisk_id}:{serial}";
+        var ids = KinoIds(id, kinopoisk_id, tmdb_id, source);
+        kinopoisk_id = ids.Kp;
+        string memKey = $"OnlineApi:externalids:{id}:{imdb_id}:{kinopoisk_id}:{serial}:{ids.Tmdb}";
         if (memoryCache.TryGetValue(memKey, out string jsonResult))
             return Content(jsonResult, "application/json; charset=utf-8");
-
-        #region KP_
-        if (id != null && id.StartsWith("KP_"))
-        {
-            string _kp = id.Substring(0, 3);
-            foreach (var eid in externalids)
-            {
-                if (eid.Value == _kp && !string.IsNullOrEmpty(eid.Key))
-                {
-                    imdb_id = eid.Key;
-                    break;
-                }
-            }
-
-            if (!string.IsNullOrEmpty(imdb_id))
-            {
-                return Json(new { imdb_id, kinopoisk_id = _kp });
-            }
-            else
-            {
-                string mkey = $"externalids:KP_:{_kp}";
-                if (!hybridCache.TryGetValue(mkey, out string _imdbid))
-                {
-                    var bearer = HeadersModel.Init(
-                        ("Authorization", $"Bearer 04941a9a3ca3ac16e2b4327347bbc1"),
-                        ("Accept", "application/json")
-                    );
-
-                    await Http.GetSpan($"https://apbugall.org/v2/movies/search?kp={_kp}", timeoutSeconds: 5, headers: bearer, spanAction: json =>
-                    {
-                        _imdbid = Rx.Match(json, "\"id_imdb\":\"(tt[^\"]+)\"");
-                    });
-
-                    if (string.IsNullOrEmpty(_imdbid))
-                        hybridCache.Set(mkey, string.Empty, DateTime.Now.AddHours(1));
-                    else
-                        hybridCache.Set(mkey, _imdbid, DateTime.Now.AddHours(8));
-                }
-
-                return Json(new { imdb_id = _imdbid, kinopoisk_id = _kp });
-            }
-        }
-        #endregion
 
         #region getAlloha / getVSDN / getTabus
         async Task<string> getAlloha(string imdb)
         {
             string kpid = null;
 
-            var bearer = HeadersModel.Init(
-                ("Authorization", $"Bearer 04941a9a3ca3ac16e2b4327347bbc1"),
-                ("Accept", "application/json")
-            );
-
-            await Http.GetSpan($"https://apbugall.org/v2/movies/search?imdb={imdb}", timeoutSeconds: 5, headers: bearer, spanAction: json =>
+            await Http.GetSpan($"https://apbugall.org/v2/movies/search?imdb={imdb}", timeoutSeconds: 5, headers: AllohaHeaders(), spanAction: json =>
             {
                 kpid = Rx.Match(json, "\"ids\":{\"kp\":([0-9]+),");
             });
@@ -255,137 +249,111 @@ public class OnlineApiController : BaseController
         //}
         #endregion
 
-        #region get imdb_id
+        await using var sqlDb = ExternalidsContext.Factory != null
+            ? ExternalidsContext.Factory.CreateDbContext()
+            : new ExternalidsContext();
+
+        string tmdbKey = ids.Tmdb > 0 ? $"{ids.Tmdb}_{serial}" : null;
+        string kpid = kinopoisk_id > 0 ? kinopoisk_id.ToString() : null;
         if (string.IsNullOrWhiteSpace(imdb_id))
         {
-            if (kinopoisk_id > 0)
-            {
-                string kinopoisk_id_str = kinopoisk_id.ToString();
-                foreach (var eid in externalids)
-                {
-                    if (eid.Value == kinopoisk_id_str && !string.IsNullOrEmpty(eid.Key))
-                    {
-                        imdb_id = eid.Key;
-                        break;
-                    }
-                }
-            }
-
-            if (string.IsNullOrWhiteSpace(imdb_id) && long.TryParse(id, out long _testid) && _testid > 0)
-            {
-                await using (var sqlDb = ExternalidsContext.Factory != null
-                    ? ExternalidsContext.Factory.CreateDbContext()
-                    : new ExternalidsContext())
-                {
-                    imdb_id = sqlDb.imdb.Find($"{id}_{serial}")?.value;
-                }
-
-                if (string.IsNullOrEmpty(imdb_id))
-                {
-                    string mkey = $"externalids:locktmdb:{serial}:{id}";
-                    if (!memoryCache.TryGetValue(mkey, out _))
-                    {
-                        memoryCache.Set(mkey, 0, DateTime.Now.AddHours(1));
-
-                        string cat = serial == 1 ? "tv" : "movie";
-                        await Http.GetSpan($"http://api.themoviedb.org/3/{cat}/{id}?api_key={CoreInit.conf.cub.api_key}&append_to_response=external_ids", timeoutSeconds: 5, spanAction: json =>
-                        {
-                            imdb_id = Rx.Match(json, "\"imdb_id\":\"(tt[0-9]+)\"");
-                        });
-
-                        if (!string.IsNullOrEmpty(imdb_id))
-                        {
-                            await using (var sqlDb = ExternalidsContext.Factory != null
-                                ? ExternalidsContext.Factory.CreateDbContext()
-                                : new ExternalidsContext())
-                            {
-                                sqlDb.Add(new ExternalidsSqlModel()
-                                {
-                                    Id = $"{id}_{serial}",
-                                    value = imdb_id
-                                });
-
-                                await sqlDb.SaveChangesLocks();
-                            }
-                        }
-                    }
-                }
-            }
+            if (kpid != null)
+                imdb_id = externalids.FirstOrDefault(pair => pair.Value == kpid).Key ??
+                    sqlDb.kinopoisk.FirstOrDefault(row => row.value == kpid)?.Id;
+            imdb_id ??= tmdbKey != null ? sqlDb.imdb.Find(tmdbKey)?.value : null;
         }
-        #endregion
 
-        #region get kinopoisk_id
-        string kpid = null;
-
-        if (!string.IsNullOrWhiteSpace(imdb_id))
+        string LocalKp(string imdb)
         {
-            externalids.TryGetValue(imdb_id, out kpid);
+            if (string.IsNullOrWhiteSpace(imdb))
+                return null;
+            externalids.TryGetValue(imdb, out string mapped);
+            return mapped is not (null or "" or "0") ? mapped : sqlDb.kinopoisk.Find(imdb)?.value;
+        }
 
-            if (string.IsNullOrEmpty(kpid) || kpid == "0")
+        kpid ??= LocalKp(imdb_id);
+        if (string.IsNullOrWhiteSpace(imdb_id) || kpid is null or "" or "0")
+        {
+            var card = await KinoApi.Title(ids.Tmdb, imdb_id, kinopoisk_id, serial == 1);
+            string foundImdb = (string)card?["id"]?["imdb"];
+            long foundKp = (long?)card?["id"]?["kinopoisk"] ?? 0;
+            if (string.IsNullOrWhiteSpace(imdb_id) && Regex.IsMatch(foundImdb ?? "", @"\Att\d{1,12}\z"))
             {
-                await using (var sqlDb = ExternalidsContext.Factory != null
-                    ? ExternalidsContext.Factory.CreateDbContext()
-                    : new ExternalidsContext())
+                imdb_id = foundImdb;
+                if (tmdbKey != null)
+                    sqlDb.imdb.Add(new ExternalidsSqlModel { Id = tmdbKey, value = imdb_id });
+            }
+            if (kpid is null or "" or "0")
+            {
+                kpid = LocalKp(imdb_id);
+                if ((kpid is null or "" or "0") && foundKp > 0 && !string.IsNullOrWhiteSpace(imdb_id) && imdb_id == foundImdb)
                 {
-                    kpid = sqlDb.kinopoisk.Find(imdb_id)?.value;
+                    kpid = foundKp.ToString();
+                    if (sqlDb.kinopoisk.Find(imdb_id) == null)
+                        sqlDb.kinopoisk.Add(new ExternalidsSqlModel { Id = imdb_id, value = kpid });
+                }
+            }
+            if (sqlDb.ChangeTracker.HasChanges())
+            {
+                await sqlDb.SaveChangesLocks();
+                sqlDb.ChangeTracker.Clear();
+            }
+        }
 
-                    if (string.IsNullOrEmpty(kpid) && kinopoisk_id == 0)
-                    {
-                        string mkey = $"externalids:lockkpid:{imdb_id}";
-                        if (!memoryCache.TryGetValue(mkey, out _))
-                        {
-                            memoryCache.Set(mkey, 0, DateTime.Now.AddDays(1));
-
-                            switch (ModInit.conf.findkp ?? "all")
-                            {
-                                case "alloha":
-                                    kpid = await getAlloha(imdb_id);
-                                    break;
-                                //case "vsdn":
-                                //    kpid = await getVSDN(imdb_id);
-                                //    break;
-                                case "tabus":
-                                    kpid = await getTabus(imdb_id);
-                                    break;
-                                default:
-                                    {
-                                        var tasks = new List<Task<string>> { /*getVSDN(imdb_id),*/ getAlloha(imdb_id), getTabus(imdb_id) };
-
-                                        while (tasks.Count > 0)
-                                        {
-                                            var completedTask = await Task.WhenAny(tasks);
-                                            tasks.Remove(completedTask);
-
-                                            var result = completedTask.Result;
-                                            if (result != null)
-                                            {
-                                                kpid = result;
-                                                break;
-                                            }
-                                        }
-
-                                        break;
-                                    }
-                            }
-
-                            if (!string.IsNullOrEmpty(kpid) && kpid != "0")
-                            {
-                                sqlDb.Add(new ExternalidsSqlModel()
-                                {
-                                    Id = imdb_id,
-                                    value = kpid
-                                });
-
-                                await sqlDb.SaveChangesLocks();
-                            }
-                        }
-                    }
+        if (string.IsNullOrWhiteSpace(imdb_id) && tmdbKey != null)
+        {
+            string guard = $"externalids:locktmdb:{tmdbKey}";
+            if (!memoryCache.TryGetValue(guard, out _))
+            {
+                memoryCache.Set(guard, 0, TimeSpan.FromHours(1));
+                string cat = serial == 1 ? "tv" : "movie";
+                await Http.GetSpan($"http://api.themoviedb.org/3/{cat}/{ids.Tmdb}?api_key={CoreInit.conf.cub.api_key}&append_to_response=external_ids", timeoutSeconds: 5,
+                    spanAction: json => imdb_id = Rx.Match(json, "\"imdb_id\":\"(tt[0-9]+)\""));
+                if (!string.IsNullOrEmpty(imdb_id))
+                {
+                    sqlDb.imdb.Add(new ExternalidsSqlModel { Id = tmdbKey, value = imdb_id });
+                    await sqlDb.SaveChangesLocks();
+                    sqlDb.ChangeTracker.Clear();
                 }
             }
         }
-        #endregion
 
-        kpid = kpid != null ? kpid : kinopoisk_id.ToString();
+        // Legacy Kinopoisk-only lookup still works if KinoAPI is unavailable.
+        if (string.IsNullOrWhiteSpace(imdb_id) && kinopoisk_id > 0)
+            imdb_id = await GetAllohaImdb(kinopoisk_id);
+
+        if (kpid is null or "" or "0")
+            kpid = LocalKp(imdb_id);
+        if ((kpid is null or "" or "0") && Regex.IsMatch(imdb_id ?? "", @"\Att\d{1,12}\z"))
+        {
+            string guard = $"externalids:lockkpid:{imdb_id}";
+            if (!memoryCache.TryGetValue(guard, out _))
+            {
+                memoryCache.Set(guard, 0, TimeSpan.FromDays(1));
+                if (ModInit.conf.findkp == "alloha")
+                    kpid = await getAlloha(imdb_id);
+                else if (ModInit.conf.findkp == "tabus")
+                    kpid = await getTabus(imdb_id);
+                else
+                {
+                    var tasks = new List<Task<string>> { getAlloha(imdb_id), getTabus(imdb_id) };
+                    while (tasks.Count > 0 && kpid == null)
+                    {
+                        var completed = await Task.WhenAny(tasks);
+                        tasks.Remove(completed);
+                        kpid = await completed;
+                    }
+                }
+
+                if (kpid != null && sqlDb.kinopoisk.Find(imdb_id) == null)
+                {
+                    sqlDb.kinopoisk.Add(new ExternalidsSqlModel { Id = imdb_id, value = kpid });
+                    await sqlDb.SaveChangesLocks();
+                }
+            }
+        }
+
+        kpid ??= "0";
 
         #region EventListener
         if (EventListener.Externalids != null)
@@ -406,8 +374,8 @@ public class OnlineApiController : BaseController
         if (CoreInit.conf.lowMemoryMode)
             return Json(new { imdb_id, kinopoisk_id = kpid });
 
-        jsonResult = $"{{\"imdb_id\":\"{imdb_id}\",\"kinopoisk_id\":\"{kpid}\"}}";
-        memoryCache.Set(memKey, jsonResult, DateTime.Now.AddHours(1));
+        jsonResult = JsonConvert.SerializeObject(new { imdb_id = imdb_id ?? "", kinopoisk_id = kpid });
+        memoryCache.Set(memKey, jsonResult, string.IsNullOrWhiteSpace(imdb_id) || kpid == "0" ? TimeSpan.FromMinutes(2) : TimeSpan.FromHours(1));
 
         return Content(jsonResult, "application/json; charset=utf-8");
     }

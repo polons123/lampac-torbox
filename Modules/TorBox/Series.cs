@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json.Linq;
+using Shared.Services;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -16,7 +17,7 @@ public partial class TorBoxController
         public long File;
         public int Season, Episode;
         public bool Numbered;
-        public string Name;
+        public string Name,DisplayName;
         public JToken Metadata;
         public int ExplicitAudio=-1, ExplicitSub=-2;
     }
@@ -108,7 +109,23 @@ public partial class TorBoxController
         var files=episodes.Where(e=>e.Episode==number).ToList();
         return files.Count==0?null:MatchEpisodeVariant(files,variant);
     }
-    static string EpisodeTitle(SeriesEpisode e) => e.Season+" сезон · "+e.Episode+" серия · "+e.Name;
+    static string EpisodeTitle(SeriesEpisode e) => e.Season+" сезон · "+e.Episode+" серия · "+(e.DisplayName??e.Name);
+
+    static async Task NameEpisodes(List<SeriesEpisode> episodes,long tmdb) {
+        if(tmdb<=0 || !KinoApi.Enabled)return;
+
+        // A season pack normally needs one lookup. Limit lookups for multi-season packs.
+        var seasons=episodes.Where(e=>e.Numbered).GroupBy(e=>e.Season).Take(4);
+        await Task.WhenAll(seasons.Select(async season=>{
+            var names=await KinoApi.Episodes(tmdb,season.Key);
+            if(names==null)return;
+            foreach(var episode in season) {
+                var entry=names.OfType<JObject>().FirstOrDefault(row=>int.TryParse(row["episode_number"]?.ToString(),out int n) && n==episode.Episode);
+                string name=entry?["name_ru"]?.Type==JTokenType.String ? (string)entry["name_ru"] : null;
+                if(!string.IsNullOrWhiteSpace(name) && name.Length<=300)episode.DisplayName=name.Trim();
+            }
+        }));
+    }
     static string TrackPart(JToken track,string field) => Regex.Replace(((string)track?[field]??"").Trim().ToLowerInvariant(),@"\s+"," ");
     static string TrackLanguage(JToken track) => TrackPart(track,"language") switch {
         "rus"=>"ru", "eng"=>"en", "ukr"=>"uk", "jpn"=>"ja", "deu" or "ger"=>"de",

@@ -3,11 +3,12 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor
 import json, shutil, subprocess, urllib.request, urllib.parse, urllib.error, threading, time, re, os
 # Only a public release runtime and synthetic accounts are used. No running service is read.
-import argparse, socket, tempfile
+import argparse, socket, sqlite3, tempfile
 parser = argparse.ArgumentParser(description="Isolated TorBox HTTP regression checks")
 parser.add_argument("--runtime", required=True, type=Path, help="extracted public Lampac release (Core.dll + runtimes/)")
 parser.add_argument("--dotnet", default=shutil.which("dotnet"), help="dotnet executable when it is not on PATH")
 parser.add_argument("--module-dir", type=Path, default=Path(__file__).resolve().parents[2] / "Modules/TorBox", help="TorBox sources, including an extracted release module")
+parser.add_argument("--kino-credentials", type=Path, help="optional directory containing a KinoAPI test credential named kinoapi")
 args = parser.parse_args()
 if not args.dotnet:
     parser.error("dotnet is not on PATH; supply --dotnet")
@@ -36,6 +37,12 @@ cfg = {"listen": {"ip": "127.0.0.1", "port": app_port, "localhost": "127.0.0.1",
        "BaseModule": {"LoadModules": [".*"], "SkipModules": []},
        "accsdb": {"enable": True, "accounts": {user: "2099-01-01T00:00:00" for user in [uid, second, outsider]}},
        "WAF": {"enable": False}, "openstat": {"enable": False}, "chromium": {"enable": False}, "serilog": False}
+if args.kino_credentials:
+    cfg["PidTor"] = {"enable": True, "emptyVoice": True, "min_sid": 0, "redapi": mock_url, "torrs": [mock_url]}
+    for name, source in [("Online", repo / "Online"), ("PidTor", repo / "Modules/PidTor")]:
+        shutil.copytree(source, p / "module" / name, ignore=shutil.ignore_patterns("bin", "obj"))
+    (p / "data").mkdir()
+    (p / "data/externalids.json").write_text("{}")
 (p / "init.conf").write_text(json.dumps(cfg))
 os.chmod(p / "init.conf", 0o600)
 shutil.copytree(args.module_dir, p / "mods/TorBox")
@@ -46,7 +53,7 @@ private = {"api_key": "fixture-key", "allowed_uids": [uid, second], "allow_exter
 (p / "torbox-private.json").write_text(json.dumps(private))
 os.chmod(p / "torbox-private.json", 0o600)
 (p / "mods" / "TorBox" / "Test.cs").write_text("""using Microsoft.AspNetCore.Mvc;using System;namespace TorBox;public partial class TorBoxController {
-[HttpGet,Route("test/reset")]public ActionResult Reset(){lock(inventoryLock)inventories.Clear();lock(badgeBatchGate){badgeBatches.Clear();badgeBackoff.Clear();}searchCache.Clear();return Payload(new{success=true});}
+[HttpGet,Route("test/reset")]public ActionResult Reset(){lock(inventoryLock)inventories.Clear();lock(badgeBatchGate){badgeBatches.Clear();badgeBackoff.Clear();badgeHashes.Clear();}searchCache.Clear();return Payload(new{success=true});}
 }""")
 m = p / "mods" / "TorBox" / "manifest.json"
 j = json.loads(m.read_text())
@@ -72,6 +79,7 @@ audioB = {"language": "ru", "title": "Studio B", "codec": "ac3", "channels": 6}
 english = {"language": "en", "title": "Original", "codec": "aac", "channels": 2}
 subRu = {"language": "ru", "title": "Full", "codec": "srt"}
 state = {"mutations": [], "streams": [], "metadata_mode": "normal", "cached": True, "expire": False, "parser_calls": 0, "stream_fail": False, "mylist": [], "links": [], "batch_mode": "ok", "pause": 0}
+episode_library_started = threading.Event()
 
 
 def safe_query(q):
@@ -139,7 +147,12 @@ class Mock(BaseHTTPRequestHandler):
         q = urllib.parse.parse_qs(u.query)
         if u.path.endswith("/indexers/all/results"):
             state["parser_calls"] += 1
-            return self.respond({"Results": rows})
+            if state.get("kino_search"):
+                state["kino_search"].append(q.get("title", [""])[0])
+                if q.get("title") == ["Теория большого взрыва"] and q.get("year") == ["2007"]:
+                    return self.respond({"Results": [dict(row(A), Title="Теория большого взрыва S01 1080p", Tracker="fixture", PublishDate="2026-01-01", Size=100000000, info={"voices": ["Studio A"], "seasons": [1]})]})
+                return self.respond({"Results": []})
+            return self.respond({} if rows is None else {"Results": rows})
         if u.path.endswith("/requestdl/batch"):
             return self.batch("GET", u)
         if u.path.endswith("/requestdl"):
@@ -148,6 +161,8 @@ class Mock(BaseHTTPRequestHandler):
             state["links"].append(("single", q.get("file_id", [""])[0], "user_ip" in q))
             return self.respond({"success": True, "data": "https://cdn.example/file/" + q.get("file_id", [""])[0]})
         if u.path.endswith("/mylist"):
+            if state.get("episode_parallel"):
+                episode_library_started.set()
             state["mylist"].append(safe_query(q))
             if "id" in q:
                 ident = int(q["id"][0])
@@ -162,6 +177,9 @@ class Mock(BaseHTTPRequestHandler):
                 page = [{k: v for k, v in item.items() if k != "files"} for item in page]
             return self.respond({"success": True, "data": page})
         if u.path.endswith("/checkcached"):
+            if state.get("episode_parallel"):
+                state["episode_overlap"] = episode_library_started.wait(timeout=2)
+                return self.respond({"success": True, "data": {A: {"cached": False}, B: {"cached": True}}})
             return self.respond({"success": True, "data": {h: {"cached": state["cached"]} for h in q.get("hash", [""])[0].split(",")}})
         if u.path.endswith("/createstream"):
             state["streams"].append(q)
@@ -240,7 +258,10 @@ log = (p / "probe-server.log").open("w")
 
 def start():
     global proc
-    proc = subprocess.Popen([args.dotnet, "Core.dll"], cwd=p, stdout=log, stderr=subprocess.STDOUT)
+    env = os.environ.copy()
+    if args.kino_credentials:
+        env["CREDENTIALS_DIRECTORY"] = str(args.kino_credentials.resolve())
+    proc = subprocess.Popen([args.dotnet, "Core.dll"], cwd=p, stdout=log, stderr=subprocess.STDOUT, env=env)
     for _ in range(100):
         try:
             if api("/torbox/status")[0] == 200:
@@ -279,6 +300,63 @@ try:
         lib.unlink()
     start()
     check("current module compiles", True)
+    if args.kino_credentials:
+        code, ids = api("/externalids?id=KP_361&serial=0")
+        check("KinoAPI resolves the numeric suffix of a KP_ identifier",
+              code == 200 and ids == {"imdb_id": "tt0137523", "kinopoisk_id": "361"})
+        code, poster = api("/kino/poster?id=550&serial=0&source=tmdb")
+        check("KinoAPI returns the Kinopoisk poster", code == 200 and poster.get("poster", "").endswith("/kp/361.jpg"))
+        code, poster = api("/kino/poster?id=550&serial=0&source=tmdb&kinopoisk_id=301")
+        check("conflicting IDs do not replace the poster", code == 200 and poster.get("poster") is None)
+        code, ids = api("/externalids?id=1418&serial=1&source=tmdb")
+        check("KinoAPI maps TMDB to IMDb and Kinopoisk", code == 200 and ids.get("imdb_id") == "tt0898266" and str(ids.get("kinopoisk_id")) == "306084")
+        with sqlite3.connect(p / "cache/Externalids.sql") as db:
+            table, = db.execute("SELECT name FROM sqlite_schema WHERE type='table' AND lower(name) IN ('imdb', 'externalidssqlmodel')").fetchone()
+            check("confirmed KinoAPI IMDb mapping is persisted", db.execute(f"SELECT value FROM {table} WHERE id=?", ("1418_1",)).fetchone() == ("tt0898266",))
+        query = "?" + urllib.parse.urlencode({"serial": 1, "title": "Fixture Alternative", "year": 2007, "tmdb_id": 1418, "rjson": "true"})
+        state["kino_search"] = ["start"]
+        code, html = get("/lite/torbox" + query)
+        check("TorBox retries a valid empty search with KinoAPI metadata", code == 200 and state["kino_search"][1:] == ["Fixture Alternative", "Теория большого взрыва"])
+        ticket = re.search(r"choose\?pick=([a-f0-9]{32})", html)[1]
+        code, html = get("/lite/torbox/choose?pick=" + ticket)
+        check("TorBox episode menu includes the localized episode name", code == 200 and "Пилотная серия" in html)
+        code, html = get("/lite/torbox" + query)
+        check("TorBox caches the successful fallback with its matched titles", code == 200 and len(state["kino_search"]) == 3)
+        code, body = api("/lite/pidtor" + query)
+        check("PidTor retries a valid empty search with KinoAPI metadata",
+              code == 200 and state["kino_search"][3:] == ["Fixture Alternative", "Теория большого взрыва"] and bool(body.get("data")))
+        code, _ = get("/lite/torbox" + query + "&clarification=1")
+        check("manual search remains unchanged", code == 404 and state["kino_search"][5:] == ["Fixture Alternative"])
+        state.pop("kino_search")
+        reset()
+
+    search = "/lite/torbox?title=Mock%20Empty"
+    rows = None
+    code, body = api(search)
+    check("missing JacRed Results reports a source error", code == 502 and "JacRed" in body["detail"])
+    rows = []
+    previous_calls = state["parser_calls"]
+    code, body = api(search)
+    check("empty Results reports no releases after an uncached error",
+          code == 404 and state["parser_calls"] == previous_calls + 1)
+    year_search = "/lite/torbox?title=1917&original_title=1917&year=2019"
+    for label, release, expected in [
+        ("numeric film title isn't treated as release year", {"Title": "1917 1080p"}, 200),
+        ("conflicting year in release title still filters remakes", {"Title": "1917 (2021) 1080p"}, 404),
+        ("structured JacRed year takes precedence", {"Title": "1917 (2021) 1080p", "info": {"relased": 2019}}, 200),
+        ("conflicting structured year filters remakes", {"Title": "1917 1080p", "info": {"relased": 2021}}, 404),
+    ]:
+        rows[:] = [dict(row(A), **release)]
+        reset()
+        check(label, get(year_search)[0] == expected)
+    rows[:] = [dict(row(B), Title="Mock Show S01 2160p Cached"), dict(row(A), Title="Mock Show S01 1080p Own")]
+    reset()
+    state["episode_parallel"] = True
+    code, html = get("/lite/torbox?serial=1&title=Mock%20Show&tb_season=1&tb_episode=2")
+    state["episode_parallel"] = False
+    check("episode library starts while cache badges are still in flight", code == 200 and state.get("episode_overlap"))
+    check("an owned exact episode still ranks before a higher resolution cached release",
+          "1080p Own" in html and "2160p Cached" in html and html.index("1080p Own") < html.index("2160p Cached"))
     initial()
     watch = api("/torbox/series/followed")[1]["items"][0]["id"]
 

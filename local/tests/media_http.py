@@ -22,12 +22,18 @@ calls = []
 
 
 class Mock(BaseHTTPRequestHandler):
+    search_responses = {}
+
     def log_message(self, *args): pass
-    def send(self, obj):
-        content=json.dumps(obj,separators=(',',':')).encode();self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(content)
+    def send(self, obj, status=200):
+        content=json.dumps(obj,separators=(',',':')).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(content)
     def do_GET(self):
         if self.path.startswith('/stream'):
             return self.send({'file_stats':[{'id':2,'path':'Sample.S01E01.mp4'}]})
+        title = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get('title', [''])[0]
+        if title in self.search_responses:
+            status, body = self.search_responses[title].pop(0)
+            return self.send(body, status)
         rows=[]
         for n,(resolution,tracker) in enumerate([('1440p','fixture+one'),('480p','second'),('1080p','selezen')]):
             rows.append({'Title':f'Sample 2026 {resolution} HDR10+', 'Tracker':tracker,'Size':100000000,'Seeders':20,'Peers':4,
@@ -55,7 +61,7 @@ def main():
         config={'listen':{'ip':'127.0.0.1','port':port,'localhost':'127.0.0.1','scheme':'http'},'BaseModule':{'LoadModules':['.*'],'SkipModules':[]},
                 'accsdb':{'enable':False},'WAF':{'enable':False},'openstat':{'enable':False},'chromium':{'enable':False},'serilog':False,
                 'Tracks':{'tsstat':endpoint,'tsauth':'fixture:secret','ffprobe_timeout_seconds':2},
-                'PidTor':{'enable':True,'min_sid':0,'redapi':endpoint,'torrs':[endpoint]}}
+                'PidTor':{'enable':True,'min_sid':0,'emptyVoice':True,'redapi':endpoint,'torrs':[endpoint]}}
         for name,content in [('init.conf',config),('base.conf',{}),('appsettings.Production.json',{})]:(root/name).write_text(json.dumps(content))
         (root/'data').mkdir();fake=root/'data/ffprobe'
         fake.write_text('''#!/usr/bin/python3
@@ -111,6 +117,25 @@ print(json.dumps({'streams':[{'codec_type':'video','codec_name':'h264'}],'format
             assert calls[0][2]=='Basic Zml4dHVyZTpzZWNyZXQ='
             assert get('/tracks/stat?hash='+HASH+'0')[1]=={}
             print('PASS film/serial/stream swarm status uses authenticated read-only get and shared cache',flush=True)
+            for title, failure in [('Unavailable', (503, {})), ('MissingResults', (200, {}))]:
+                Mock.search_responses[title] = [failure, (200, {'Results': []})]
+                search = '/lite/pidtor?origsource=true&title=' + title
+                code, body = get(search)
+                assert code == 503 and 'JacRed' in body, (code, body)
+                assert get(search) == (200, [])
+                assert not Mock.search_responses[title]
+                assert get(search) == (200, [])
+            print('PASS PidTor distinguishes JacRed errors, retries after failure and caches valid empty results',flush=True)
+            Mock.search_responses['MissingInfo'] = [(200, {'Results': [
+                None,
+                {'Title': 'MissingInfo 1080p', 'Seeders': 20,
+                 'MagnetUri': 'magnet:?xt=urn:btih:' + 'b' * 40},
+                {'Title': 'MissingInfo 1440p', 'Tracker': 'fixture', 'Seeders': 20,
+                 'MagnetUri': 'magnet:?xt=urn:btih:' + 'c' * 40, 'info': {'voices': []}},
+            ]})]
+            code, data = get('/lite/pidtor?rjson=true&title=MissingInfo')
+            assert code == 200 and {row['pidtor']['res'] for row in data['data']} == {'1080p', '1440p'}, (code, data)
+            print('PASS PidTor retains valid releases when JacRed omits optional metadata',flush=True)
             query='/lite/pidtor?title=Sample&original_title=Sample&year=2026&serial=0'
             code,data=get(query+'&rjson=true');assert code==200 and data.get('data'),(code,data,(root/'server.log').read_text()[-5000:])
             rows=data['data'];assert len(rows)==2,rows

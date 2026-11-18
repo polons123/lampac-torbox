@@ -439,6 +439,8 @@
           var query = [];
           query.push('id=' + encodeURIComponent(object.movie.id));
           query.push('serial=' + (object.movie.name ? 1 : 0));
+          query.push('source=' + encodeURIComponent(object.movie.source || 'tmdb'));
+          if (object.movie.tmdb_id) query.push('tmdb_id=' + encodeURIComponent(object.movie.tmdb_id));
           if (object.movie.imdb_id) query.push('imdb_id=' + (object.movie.imdb_id || ''));
           if (object.movie.kinopoisk_id) query.push('kinopoisk_id=' + (object.movie.kinopoisk_id || ''));
           var url = Defined.localhost + 'externalids?' + query.join('&');
@@ -3000,20 +3002,58 @@
       });
       e.render.after(btn);
     }
+    function useRussianPoster(render, movie) {
+      if ('{kino_posters}' !== 'enabled' || !movie || !/^ru(?:[-_]|$)/i.test(Lampa.Storage.field('tmdb_lang') || 'ru')) return;
+      var img = render.find('.full-start__img')[0];
+      if (!img || img.getAttribute('data-lampac-kino') === String(movie.id)) return;
+      var cardId = String(movie.id);
+      img.setAttribute('data-lampac-kino', cardId);
+      var params = {
+        id: movie.id || '',
+        source: movie.source || 'tmdb',
+        tmdb_id: movie.tmdb_id || 0,
+        kinopoisk_id: movie.kinopoisk_id || 0,
+        imdb_id: movie.imdb_id || '',
+        serial: movie.name || movie.media_type === 'tv' ? 1 : 0
+      };
+      var query = Object.keys(params).map(function (name) {
+        return name + '=' + encodeURIComponent(params[name]);
+      }).join('&');
+      var posters = new Lampa.Reguest();
+      posters.timeout(4000);
+      posters.silent(account(Defined.localhost + 'kino/poster?' + query), function (json) {
+        if (!json || !json.poster || img.src === json.poster) return;
+        var probe = new Image();
+        probe.referrerPolicy = 'no-referrer';
+        probe.onload = function () {
+          if (img.getAttribute('data-lampac-kino') !== cardId || !document.documentElement.contains(img)) return;
+          var original = img.getAttribute('src');
+          var originalError = img.onerror;
+          img.onerror = function (event) {
+            img.onerror = originalError;
+            if (original) img.src = original;
+            else if (originalError) originalError.call(img, event);
+          };
+          img.referrerPolicy = 'no-referrer';
+          img.src = json.poster;
+        };
+        probe.src = json.poster;
+      }, function () {}, false, { headers: addHeaders() });
+    }
+
     Lampa.Listener.follow('full', function (e) {
       if (e.type == 'complite') {
-        addButton({
-          render: e.object.activity.render().find('.view--torrent'),
-          movie: e.data.movie
-        });
+        var render = e.object.activity.render();
+        addButton({ render: render.find('.view--torrent'), movie: e.data.movie });
+        useRussianPoster(render, e.data.movie);
       }
     });
     try {
       if (Lampa.Activity.active().component == 'full') {
-        addButton({
-          render: Lampa.Activity.active().activity.render().find('.view--torrent'),
-          movie: Lampa.Activity.active().card
-        });
+        var active = Lampa.Activity.active();
+        var activeRender = active.activity.render();
+        addButton({ render: activeRender.find('.view--torrent'), movie: active.card });
+        useRussianPoster(activeRender, active.card);
       }
     } catch (e) { }
     if (Lampa.Manifest.app_digital >= 177) {
