@@ -1,7 +1,6 @@
 ﻿using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-using Shared.Services;
 using System;
 using System.ComponentModel.DataAnnotations;
 using System.IO;
@@ -11,8 +10,6 @@ namespace Online;
 
 public partial class ExternalidsContext
 {
-    public static readonly string semaphoreKey = "ExternalidsContext";
-
     public static IDbContextFactory<ExternalidsContext> Factory { get; set; }
 
     public static void Initialization(IServiceProvider applicationServices)
@@ -25,25 +22,20 @@ public partial class ExternalidsContext
             sqlDb.Database.EnsureCreated();
     }
 
-    async public Task<int> SaveChangesLocks()
+    public async Task SaveMapping(string id, string value)
     {
-        var semaphore = new SemaphorManager(semaphoreKey, TimeSpan.FromSeconds(30));
-
         try
         {
-            bool _acquired = await semaphore.WaitAsync();
-            if (!_acquired)
-                return 0;
-
-            return await base.SaveChangesAsync();
+            // EF maps both DbSet properties to this existing table.
+            await Database.ExecuteSqlInterpolatedAsync($"""
+                INSERT INTO ExternalidsSqlModel (Id, value) VALUES ({id}, {value})
+                ON CONFLICT(Id) DO UPDATE SET value = excluded.value
+                WHERE ExternalidsSqlModel.value IS NULL OR trim(ExternalidsSqlModel.value) IN ('', '0')
+                """);
         }
-        catch
+        catch (SqliteException ex)
         {
-            return 0;
-        }
-        finally
-        {
-            semaphore.Release();
+            Serilog.Log.Warning("Cannot save external ID mapping in SQLite (code {Code})", ex.SqliteErrorCode);
         }
     }
 }

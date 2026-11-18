@@ -12,14 +12,17 @@
 #   Modules/*         -> module/*        dotnet publish: ../Modules/** -> module/
 #   Online/*          -> module/Online/*
 #   local/wwwroot/*   -> wwwroot/*
+# При изменениях Shared собираем Shared.dll из указанного git-ref.
 set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 UPSTREAM_REPO=${LAMPAC_UPSTREAM_REPO:-lampac-nextgen/lampac}
+DIST_DIR=${LAMPAC_DIST_DIR:-"$REPO_ROOT/dist"}
 ZIP_NAME=lampac-nextgen.zip
 
 TAG=${1:?usage: build-release.sh <upstream-tag> [git-ref]}
 REF=${2:-HEAD}
+COMMIT=$(git -C "$REPO_ROOT" rev-parse "$REF^{commit}")
 
 BASE=$(tr -d '[:space:]' < "$REPO_ROOT/local/base")
 [ -n "$BASE" ] || { echo "local/base пуст" >&2; exit 1; }
@@ -44,7 +47,8 @@ map_path() {
 
 work=$(mktemp -d /tmp/lampac-build.XXXXXX)
 trap 'rm -rf "$work"' EXIT
-mkdir -p "$work/app" "$REPO_ROOT/dist"
+mkdir -p "$work/app" "$DIST_DIR"
+DIST_DIR=$(cd "$DIST_DIR" && pwd)
 
 url="https://github.com/${UPSTREAM_REPO}/releases/download/${TAG}/${ZIP_NAME}"
 cache_dir=${LAMPAC_BUILD_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/lampac-build}
@@ -85,31 +89,43 @@ applied=0
 skipped=0
 : > "$work/overlay.list"
 : > "$work/overlay.log"
+shared_changes=$(git -C "$REPO_ROOT" diff --name-only "$BASE" "$COMMIT" -- Shared Directory.Build.props Directory.Build.targets Directory.Packages.props)
+if [ -n "$shared_changes" ]; then
+  mkdir "$work/source"
+  git -C "$REPO_ROOT" archive "$COMMIT" Shared Directory.Build.props Directory.Build.targets Directory.Packages.props | tar -x -C "$work/source"
+  "${DOTNET:-dotnet}" build "$work/source/Shared/Shared.csproj" --configuration Release --nologo \
+    -p:Version="$TAG" -p:AssemblyVersion="${TAG%%.*}.0.0.0" -p:InformationalVersion="$TAG+$COMMIT"
+  install -m 0644 "$work/source/Shared/bin/Release/net10.0/Shared.dll" "$work/app/Shared.dll"
+  printf '%s\n' 'Shared -> Shared.dll' >> "$work/overlay.log"
+  printf '%s\n' 'Shared.dll' >> "$work/overlay.list"
+  applied=$((applied + 1))
+fi
+
 while IFS= read -r src; do
   if ! dst=$(map_path "$src"); then
     skipped=$((skipped + 1))
     continue
   fi
   mkdir -p "$work/app/$(dirname "$dst")"
-  git -C "$REPO_ROOT" show "$REF:$src" > "$work/app/$dst"
+  git -C "$REPO_ROOT" show "$COMMIT:$src" > "$work/app/$dst"
   printf '%s -> %s\n' "$src" "$dst" >> "$work/overlay.log"
   printf '%s\n' "$dst" >> "$work/overlay.list"
   applied=$((applied + 1))
-done < <(git -C "$REPO_ROOT" diff --name-only --diff-filter=ACMR "$BASE" "$REF")
+done < <(git -C "$REPO_ROOT" diff --name-only --diff-filter=ACMR "$BASE" "$COMMIT")
 
 while IFS= read -r src; do
   if dst=$(map_path "$src"); then
     rm -f "$work/app/$dst"
     printf '%s -> %s (удалён)\n' "$src" "$dst" >> "$work/overlay.log"
   fi
-done < <(git -C "$REPO_ROOT" diff --name-only --diff-filter=D "$BASE" "$REF")
+done < <(git -C "$REPO_ROOT" diff --name-only --diff-filter=D "$BASE" "$COMMIT")
 
-rm -f "$REPO_ROOT/dist/$ZIP_NAME" "$REPO_ROOT/dist/overlay.sha256"
+rm -f "$DIST_DIR/$ZIP_NAME" "$DIST_DIR/overlay.sha256"
 if command -v zip >/dev/null 2>&1; then
-  (cd "$work/app" && zip -qr "$REPO_ROOT/dist/$ZIP_NAME" .)
+  (cd "$work/app" && zip -qr "$DIST_DIR/$ZIP_NAME" .)
 else
   # zip может отсутствовать на сервере; python3 есть всегда
-  python3 - "$work/app" "$REPO_ROOT/dist/$ZIP_NAME" <<'PY'
+  python3 - "$work/app" "$DIST_DIR/$ZIP_NAME" <<'PY'
 import os, sys, zipfile
 root, out = sys.argv[1], sys.argv[2]
 with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
@@ -123,22 +139,22 @@ with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
 PY
 fi
 (cd "$work/app" && while read -r dst; do [ -f "$dst" ] && sha256sum "$dst"; done < "$work/overlay.list" \
-  | sort -k2) > "$REPO_ROOT/dist/overlay.sha256"
+  | sort -k2) > "$DIST_DIR/overlay.sha256"
 
 {
   echo "upstream_tag=$TAG"
   echo "upstream_repo=$UPSTREAM_REPO"
   echo "base=$BASE"
   echo "ref=$REF"
-  echo "commit=$(git -C "$REPO_ROOT" rev-parse "$REF^{commit}")"
+  echo "commit=$COMMIT"
   echo "built=$(date -u +%FT%TZ)"
   echo "overlay_files=$applied"
   echo "skipped_local_paths=$skipped"
-  echo "zip_sha256=$(sha256sum "$REPO_ROOT/dist/$ZIP_NAME" | cut -d' ' -f1)"
-  echo "overlay_sha256=$(sha256sum "$REPO_ROOT/dist/overlay.sha256" | cut -d' ' -f1)"
-} > "$REPO_ROOT/dist/build-info.txt"
+  echo "zip_sha256=$(sha256sum "$DIST_DIR/$ZIP_NAME" | cut -d' ' -f1)"
+  echo "overlay_sha256=$(sha256sum "$DIST_DIR/overlay.sha256" | cut -d' ' -f1)"
+} > "$DIST_DIR/build-info.txt"
 
 echo ">> наложено файлов: $applied (пропущено служебных: $skipped)"
 cat "$work/overlay.log"
 echo ">> готово:"
-cat "$REPO_ROOT/dist/build-info.txt"
+cat "$DIST_DIR/build-info.txt"

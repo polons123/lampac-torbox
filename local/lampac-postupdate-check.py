@@ -104,7 +104,7 @@ def release_hashes():
         result = {}
         for row in rows:
             digest, path = row.split(None, 1)
-            if not re.fullmatch('[a-f0-9]{64}', digest) or not path.startswith(('mods/', 'module/', 'wwwroot/', 'release-tools/')) or any(p in ('', '.', '..') for p in path.split('/')) or path in result:
+            if not re.fullmatch('[a-f0-9]{64}', digest) or (path != 'Shared.dll' and not path.startswith(('mods/', 'module/', 'wwwroot/', 'release-tools/'))) or any(p in ('', '.', '..') for p in path.split('/')) or path in result:
                 raise ValueError('invalid or duplicate manifest entry')
             result[path] = digest
         if not result:
@@ -118,7 +118,7 @@ def release_hashes():
             if not isinstance(patches, dict) or not patches:
                 raise ValueError('empty local patch ledger')
             for path, patch in patches.items():
-                if (not path.startswith(('mods/', 'module/', 'wwwroot/', 'release-tools/')) or
+                if ((path != 'Shared.dll' and not path.startswith(('mods/', 'module/', 'wwwroot/', 'release-tools/'))) or
                     any(p in ('', '.', '..') for p in path.split('/')) or not isinstance(patch, dict) or
                     'base_sha256' not in patch or patch['base_sha256'] != result.get(path) or
                     not re.fullmatch('[a-f0-9]{64}', str(patch.get('sha256', '')))):

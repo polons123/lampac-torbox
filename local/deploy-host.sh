@@ -59,7 +59,7 @@ assert hashlib.sha256((work/'overlay.sha256').read_bytes()).hexdigest()==info['o
 seen=set()
 for line in (work/'overlay.sha256').read_text().splitlines():
  digest,path=line.split(None,1)
- assert re.fullmatch('[a-f0-9]{64}',digest) and path.startswith(('mods/','module/','wwwroot/','release-tools/'))
+ assert re.fullmatch('[a-f0-9]{64}',digest) and (path == 'Shared.dll' or path.startswith(('mods/','module/','wwwroot/','release-tools/')))
  assert not any(p in ('','.','..') for p in path.split('/')) and path not in seen,'invalid manifest path'
  seen.add(path)
 assert seen and len(seen)==int(info['overlay_files']),'incomplete manifest'

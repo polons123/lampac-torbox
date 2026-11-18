@@ -1,10 +1,10 @@
 using Microsoft.Extensions.Caching.Memory;
 using Newtonsoft.Json.Linq;
-using Shared.Services.Hybrid;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.RateLimiting;
@@ -13,16 +13,16 @@ namespace Shared.Services;
 
 public static class KinoApi
 {
-    static readonly HttpClient client = new(new HttpClientHandler { AllowAutoRedirect = false })
-    {
-        Timeout = TimeSpan.FromSeconds(2),
-        MaxResponseContentBufferSize = 1024 * 1024
-    };
+    const int maxResponseBytes = 1024 * 1024;
+    static readonly MemoryCache cache = new(new MemoryCacheOptions { SizeLimit = 8 * 1024 * 1024 });
+    static readonly Uri baseUrl = ReadBaseUrl();
+    static readonly string key = ReadKey();
+    static readonly Lazy<HttpClient> client = new(CreateClient);
 
     static readonly ConcurrentDictionary<string, Lazy<Task<JToken>>> pending = new();
 
-    static readonly string key = ReadKey();
     static long retryAfterTicks;
+    static long nextWarningTicks;
     static readonly SlidingWindowRateLimiter rate = new(new SlidingWindowRateLimiterOptions
     {
         PermitLimit = 8,
@@ -30,6 +30,32 @@ public static class KinoApi
         SegmentsPerWindow = 4,
         QueueLimit = 0
     });
+
+    static Uri ReadBaseUrl()
+    {
+        string configured = Environment.GetEnvironmentVariable("LAMPAC_KINOAPI_BASE_URL");
+        string url = string.IsNullOrWhiteSpace(configured) ? "https://kinoapi.lampac.dev/api/v1/" : configured.Trim();
+        if (Uri.TryCreate(url.TrimEnd('/') + "/", UriKind.Absolute, out var uri) &&
+            (uri.Scheme == Uri.UriSchemeHttps || (uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback)) &&
+            uri.UserInfo.Length == 0 && uri.Query.Length == 0 && uri.Fragment.Length == 0)
+            return uri;
+
+        Serilog.Log.Warning("KinoAPI disabled: invalid base URL");
+        return null;
+    }
+
+    static HttpClient CreateClient()
+    {
+        var handler = Http.HandlerOrNull(baseUrl.AbsoluteUri, null) ?? new HttpClientHandler();
+        handler.AllowAutoRedirect = false;
+        handler.UseCookies = false;
+        handler.ServerCertificateCustomValidationCallback = null;
+        return new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(2),
+            MaxResponseContentBufferSize = maxResponseBytes
+        };
+    }
 
     static string ReadKey()
     {
@@ -40,22 +66,35 @@ public static class KinoApi
         try
         {
             string value = File.ReadAllText(Path.Combine(directory, "kinoapi")).Trim();
-            return Regex.IsMatch(value, @"\A[A-Za-z0-9_-]{12,256}\z") ? value : null;
+            if (Regex.IsMatch(value, @"\A[A-Za-z0-9_-]{12,256}\z"))
+                return value;
+            Serilog.Log.Warning("KinoAPI disabled: invalid credential format");
         }
-        catch (IOException) { return null; }
-        catch (UnauthorizedAccessException) { return null; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            if (ex is not FileNotFoundException || Environment.GetEnvironmentVariable("LAMPAC_KINOAPI_BASE_URL") != null)
+                Serilog.Log.Warning("KinoAPI disabled: cannot read credential ({Kind})", ex.GetType().Name);
+        }
+        return null;
     }
 
-    public static bool Enabled => !string.IsNullOrWhiteSpace(key);
+    public static bool Enabled => key != null && baseUrl != null;
+
+    static void Warn(string reason)
+    {
+        long now = DateTime.UtcNow.Ticks;
+        long previous = Interlocked.Read(ref nextWarningTicks);
+        if (now >= previous && Interlocked.CompareExchange(ref nextWarningTicks, now + TimeSpan.TicksPerMinute, previous) == previous)
+            Serilog.Log.Warning("KinoAPI request failed: {Reason}", reason);
+    }
 
     static Task<JToken> Get(string path)
     {
         if (!Enabled)
             return Task.FromResult<JToken>(null);
 
-        var cache = HybridCache.GetMemory();
-        if (cache != null && cache.TryGetValue("kinoapi:" + path, out JToken data))
-            return Task.FromResult(data);
+        if (cache.TryGetValue(path, out byte[] data))
+            return Task.FromResult(data == null ? null : JToken.Parse(Encoding.UTF8.GetString(data)));
 
         return pending.GetOrAdd(path, p => new Lazy<Task<JToken>>(() => Fetch(p))).Value;
     }
@@ -70,13 +109,12 @@ public static class KinoApi
             if (!lease.IsAcquired)
                 return null;
 
-            using var request = new HttpRequestMessage(HttpMethod.Get, "https://kinoapi.lampac.dev/api/v1/" + path);
+            using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(baseUrl, path));
             request.Headers.Add("X-API-Key", key);
-            using var response = await client.SendAsync(request);
-            var cache = HybridCache.GetMemory();
+            using var response = await client.Value.SendAsync(request);
             if (response.StatusCode == HttpStatusCode.NotFound)
             {
-                cache?.Set<JToken>("kinoapi:" + path, null, TimeSpan.FromMinutes(10));
+                Store(path, null, TimeSpan.FromMinutes(10));
                 return null;
             }
             if (response.StatusCode == HttpStatusCode.TooManyRequests)
@@ -87,24 +125,67 @@ public static class KinoApi
                 Interlocked.Exchange(ref retryAfterTicks, next.UtcTicks);
             }
             if (!response.IsSuccessStatusCode)
+            {
+                Warn($"HTTP {(int)response.StatusCode}");
                 return null;
+            }
 
             var data = JObject.Parse(await response.Content.ReadAsStringAsync())["data"];
-            if (data is JObject or JArray)
+            var result = Project(data);
+            if (result != null)
             {
-                cache?.Set("kinoapi:" + path, data, TimeSpan.FromHours(12));
-                return data;
+                Store(path, Encoding.UTF8.GetBytes(result.ToString(Newtonsoft.Json.Formatting.None)), TimeSpan.FromHours(12));
+                return result;
             }
+            Warn("unexpected response shape");
             return null;
         }
         catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or Newtonsoft.Json.JsonException)
         {
+            Warn(ex.GetType().Name);
             return null;
         }
         finally
         {
             pending.TryRemove(path, out _);
         }
+    }
+
+    static void Store(string path, byte[] data, TimeSpan ttl)
+        => cache.Set(path, data, new MemoryCacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = ttl,
+            Size = 256 + path.Length * sizeof(char) + (data?.Length ?? 0)
+        });
+
+    static JToken Project(JToken data)
+    {
+        static JObject Pick(JToken token, params string[] fields)
+        {
+            var result = new JObject();
+            if (token is JObject obj)
+                foreach (var field in fields)
+                    if (obj[field] is JValue value)
+                        result[field] = value.DeepClone();
+            return result;
+        }
+
+        if (data is JArray episodes)
+            return new JArray(episodes.OfType<JObject>().Select(episode => Pick(episode, "episode_number", "name_ru")));
+        if (data is not JObject card || card["id"] is not JObject ids ||
+            !ValidIdNumber(ids["tmdb"]) || !ValidIdNumber(ids["kinopoisk"]) ||
+            (ids["imdb"] != null && ids["imdb"].Type is not (JTokenType.Null or JTokenType.String)))
+            return null;
+
+        var title = Pick(card, "type");
+        title["id"] = Pick(ids, "tmdb", "imdb", "kinopoisk");
+        title["title"] = Pick(card["title"], "ru", "original");
+        title["release"] = Pick(card["release"], "year");
+        title["images"] = new JObject
+        {
+            ["kinopoisk"] = Pick((card["images"] as JObject)?["kinopoisk"], "poster")
+        };
+        return title;
     }
 
     public static async Task<JObject> Title(long tmdb, string imdb, long kinopoisk, bool series)
@@ -119,8 +200,6 @@ public static class KinoApi
 
         var data = await Get($"titles/by/{lookup}?type={type}&include=images") as JObject;
         if (data?["id"] is not JObject ids || Text(data["type"]) != type ||
-            !ValidIdNumber(ids["tmdb"]) || !ValidIdNumber(ids["kinopoisk"]) ||
-            (ids["imdb"] != null && ids["imdb"].Type is not (JTokenType.Null or JTokenType.String)) ||
             (tmdb > 0 && (long?)ids["tmdb"] != tmdb) ||
             (imdb != null && (string)ids["imdb"] is string returnedImdb && returnedImdb != imdb) ||
             (kinopoisk > 0 && (long?)ids["kinopoisk"] is long returnedKp && returnedKp != kinopoisk) ||

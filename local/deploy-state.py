@@ -49,7 +49,7 @@ def code_directories(root, work):
     for line in (work / 'overlay.sha256').read_text().splitlines():
         name = line.split(None, 1)[1]
         relative = Path(name)
-        if relative.is_absolute() or '..' in relative.parts or relative.parts[0] not in ('mods', 'module', 'wwwroot', 'release-tools'):
+        if relative.is_absolute() or '..' in relative.parts or (name != 'Shared.dll' and relative.parts[0] not in ('mods', 'module', 'wwwroot', 'release-tools')):
             raise ValueError('invalid overlay path: ' + name)
         directory = root / relative.parent
         while directory != root:

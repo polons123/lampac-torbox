@@ -81,6 +81,7 @@ class DeployTests(unittest.TestCase):
         self.put('database/torbox-series.json', '{}')
         self.put('database/TimeCode.sql', 'old schema')
         self.put('Core.dll', 'old core')
+        self.put('Shared.dll', 'old shared')
         self.put('version.txt', 'old')
         self.put('users.json', 'old tokens')
         self.put('module/Online/plugin.js', 'old script')
@@ -98,7 +99,8 @@ class DeployTests(unittest.TestCase):
         assets.mkdir()
         overlay = {'module/Online/plugin.js': b'new script',
                    'release-tools/lampac-postupdate-check.py': b'new checker',
-                   'mods/TorBox/new/script.js': b'new plugin'}
+                   'mods/TorBox/new/script.js': b'new plugin',
+                   'Shared.dll': b'new shared'}
         with zipfile.ZipFile(assets / 'lampac-nextgen.zip', 'w') as z:
             z.writestr('Core.dll', 'new core')
             for name, content in overlay.items():
@@ -106,7 +108,7 @@ class DeployTests(unittest.TestCase):
         manifest = ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, data in overlay.items())
         (assets / 'overlay.sha256').write_text(manifest)
         info = {'zip_sha256': hashlib.sha256((assets / 'lampac-nextgen.zip').read_bytes()).hexdigest(),
-                'overlay_sha256': hashlib.sha256(manifest.encode()).hexdigest(), 'overlay_files': 3}
+                'overlay_sha256': hashlib.sha256(manifest.encode()).hexdigest(), 'overlay_files': len(overlay)}
         (assets / 'build-info.txt').write_text(''.join(f'{k}={v}\n' for k, v in info.items()))
         tools = b / 'bin'
         tools.mkdir()
@@ -143,6 +145,7 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         config = json.loads((self.root / 'init.conf').read_text())
         self.assertEqual(config, self.old)
+        self.assertEqual((self.root / 'Shared.dll').read_bytes(), b'new shared')
         self.assertEqual((self.root / 'mods/TorBox/new').stat().st_mode & 0o777, 0o755)
         for name in ['init.conf', 'excludes.conf', 'torbox-private.json',
                      'mods/TorBox/manifest.json', 'database/torbox-library.json',

@@ -1,6 +1,6 @@
 const fs = require('fs'), vm = require('vm'), assert = require('assert'), path = require('path');
 const source = fs.readFileSync(path.join(__dirname, '../wwwroot/infuseSave.js'), 'utf8')
-  .replace('    if (!window.plugin_its_ready)', '    window.testApi={sendPreparedLinks,addSingleSaveAction,addBulkSaveAction,createEditableLinks,normalizeEditableLinks,episodeFromFilename,sourceEpisodePattern,applyEpisodeTemplate,getPreparedLinks,infuseRequest};\n    if (!window.plugin_its_ready)');
+  .replace('    if (!window.plugin_its_ready)', '    window.testApi={sendPreparedLinks,addSingleSaveAction,addBulkSaveAction,createEditableLinks,normalizeEditableLinks,setEditedName,episodeFromFilename,sourceEpisodePattern,applyEpisodeTemplate,getPreparedLinks,infuseRequest};\n    if (!window.plugin_its_ready)');
 const sent = [], requests = [], notices = [];
 let identity = 'profile-one';
 const context = { URL, console, document: {currentScript:{src:'https://lampac.example/infuseSave.js'}}, setTimeout: f => f(),
@@ -73,10 +73,16 @@ for (const [season, count, year] of [[1, 12, 2015], [2, 10, 2017], [3, 4, 2018]]
   }
 }
 const fromTorBox = api.createEditableLinks(fortitude, null);
-fromTorBox[0].editedName = 'incorrect manual name';
+api.setEditedName(fromTorBox[0], 'Fortitude S01E01 - Custom');
 fromTorBox[1].enabled = false;
+fromTorBox[2].source.infuse_name = 'Unnormalized S01E03.mkv';
+fromTorBox[2].editedName = 'Unnormalized S01E03';
 api.normalizeEditableLinks(fromTorBox, null);
+assert.equal(fromTorBox[0].editedName, 'Fortitude S01E01 - Custom');
+assert.equal(fromTorBox[2].editedName, 'Fortitude S01E03');
+api.normalizeEditableLinks(fromTorBox, null, true);
 assert.equal(fromTorBox[0].editedName, 'Fortitude S01E01');
+assert.equal(fromTorBox[0].nameEdited, false);
 assert.equal(fromTorBox[1].enabled, false);
 fromTorBox[1].enabled = true;
 assert.deepEqual(Array.from(api.getPreparedLinks(fromTorBox, null), link => link.filename), expected);
@@ -91,7 +97,7 @@ const confirmed = { media_type: 'tv', original_name: 'Fortitude', first_air_date
 const confirmedNames = api.createEditableLinks([fortitude[22]], confirmed);
 api.normalizeEditableLinks(confirmedNames, confirmed);
 assert.equal(api.getPreparedLinks(confirmedNames, confirmed)[0].filename, 'Fortitude (2015) S03E01.mkv');
-console.log('PASS: all 26 Fortitude files, normalization after manual edits, TorrServer, and first-air year');
+console.log('PASS: all 26 Fortitude files, manual-name preservation and reset, TorrServer, and first-air year');
 
 const legacy = api.createEditableLinks([
   { name: 'Show/Disc 1/Track 03.mkv', url: original },
@@ -108,6 +114,7 @@ assert.equal(matcher(legacy[1].source).season, 2);
 assert.equal(api.sourceEpisodePattern('Track {episode}-{episode}.mkv', template), null);
 assert.equal(api.sourceEpisodePattern('Track {episode}.mkv', template)(legacy[1].source), null);
 const applied = api.applyEpisodeTemplate(legacy, legacy[0], template, matcher);
+api.normalizeEditableLinks(legacy, null);
 assert.equal(applied.renamed, 2);
 assert.equal(applied.skipped, 1);
 assert.equal(legacy[2].enabled, false);
@@ -116,6 +123,11 @@ assert.deepEqual(Array.from(api.getPreparedLinks(legacy, null).slice(0, 2), link
   ['Correct Show (2015) S01E03.mkv', original],
   ['Correct Show (2015) S02E07.mp4', original + '&second=1']
 ]);
+api.normalizeEditableLinks(legacy, null, true);
+assert.equal(legacy[0].templateApplied, false);
+assert.equal(legacy[1].templateApplied, false);
+assert.notEqual(legacy[1].editedName, 'Correct Show (2015) S02E07');
+assert.equal(legacy[2].enabled, false);
 const sorted = api.createEditableLinks([fortitude[14], fortitude[0], fortitude[25]], null);
 sorted[0].editedName = 'Fortitude Custom S02E03 - Episode title';
 api.applyEpisodeTemplate(sorted, sorted[0], api.episodeFromFilename({ name: sorted[0].editedName }));

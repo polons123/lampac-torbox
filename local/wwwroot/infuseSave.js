@@ -107,6 +107,16 @@
           en: 'Normalize names',
           uk: 'Нормалізувати імена'
         },
+        its_reset_names: {
+          ru: 'Сбросить имена',
+          en: 'Reset names',
+          uk: 'Скинути імена'
+        },
+        its_reset_names_prompt: {
+          ru: 'Заменить ручные имена и шаблоны автоматическими именами?',
+          en: 'Replace manual and template names with automatically generated names?',
+          uk: 'Замінити ручні імена та шаблони автоматичними іменами?'
+        },
         its_sort_status: {
           ru: 'Сортировка статуса',
           en: 'Status sort',
@@ -367,12 +377,14 @@
         };
       });
     }
-    function normalizeEditableLinks(links, movie) {
-      links.forEach(function (item, index) {
+    function normalizeEditableLinks(links, movie, reset) {
+      links.forEach(function (item) {
+        if (!reset && (item.nameEdited || item.templateApplied)) return;
         var source = Object.assign({}, item.source);
         delete source.infuse_name;
-        var prepared = prepareInfuseItem(source, movie, index);
+        var prepared = prepareInfuseItem(source, movie, item.sourceIndex);
         item.editedName = getFileMeta(prepared.filename).name;
+        item.nameEdited = false;
         item.templateApplied = false;
         var coordinates = infuseEpisode(source);
         item.seasonKey = coordinates && coordinates.season > 0 ? String(coordinates.season) : resolveSeasonKey(source);
@@ -485,12 +497,16 @@
       titleNode.on('click', registerTap);
       titleNode.on('hover:long', activate);
     }
+    function setEditedName(item, value) {
+      var name = String(value || '').trim();
+      if (name && name !== item.editedName) {
+        item.editedName = name;
+        item.nameEdited = true;
+      }
+    }
     function openFileNameEditor(item, onDone, title) {
       if (!Lampa.Input || typeof Lampa.Input.edit !== 'function') {
-        var promptValue = window.prompt(title || tr('its_file_name_title'), item.editedName);
-        if (promptValue !== null && String(promptValue).trim()) {
-          item.editedName = String(promptValue).trim();
-        }
+        setEditedName(item, window.prompt(title || tr('its_file_name_title'), item.editedName));
         onDone();
         return;
       }
@@ -503,10 +519,7 @@
         nosave: true,
         nomic: true
       }, function (value) {
-        var nextValue = String(value || '').trim();
-        if (nextValue) {
-          item.editedName = nextValue;
-        }
+        setEditedName(item, value);
         layer.removeClass('its-links-layer--hidden');
         onDone();
       });
@@ -603,6 +616,9 @@
       });
       html.find('[data-action="save"]').on('hover:enter', actions.save);
       html.find('[data-action="normalize"]').on('hover:enter', actions.normalize);
+      html.find('[data-action="normalize"]').after(
+        $('<div class="its-links-editor__button selector" data-action="reset-names"></div>')
+          .text(tr('its_reset_names')).on('hover:enter', actions.resetNames));
       html.find('[data-action="disable-all"]').on('hover:enter', actions.disableAll);
       html.find('[data-action="sort-status"]').on('hover:enter', actions.sortStatus);
       html.find('[data-action="filter-season"]').on('hover:enter', actions.filterSeason);
@@ -830,6 +846,33 @@
             normalizeEditableLinks(state.links, state.movie);
             _render({
               action: 'normalize'
+            });
+          },
+          resetNames: function resetNames() {
+            var focus = { action: 'reset-names' };
+            setLayerVisible(false);
+            Lampa.Select.show({
+              title: tr('its_reset_names_prompt'),
+              items: [
+                { title: tr('cancel'), selected: true },
+                { title: tr('its_reset_names'), reset: true }
+              ],
+              onBack: function () {
+                setLayerVisible(true);
+                focusSelector(focus);
+              },
+              onSelect: function (choice) {
+                Lampa.Select.hide();
+                if (!layer) return;
+                setLayerVisible(true);
+                if (choice.reset) {
+                  normalizeEditableLinks(state.links, state.movie, true);
+                  state.seasonFilter = 'all';
+                  _render(focus);
+                } else {
+                  focusSelector(focus);
+                }
+              }
             });
           },
           disableAll: function disableAll() {

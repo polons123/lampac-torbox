@@ -55,12 +55,12 @@ public partial class TorBoxController
         }
     }
 
-    ActionResult Similar(SimilarTpl t, params (int Season,int Episode)[] frames) {
+    ActionResult Similar(SimilarTpl t, params (int Season,int Episode)?[] frames) {
         string html=t.ToHtml();
         if(frames.Length>0){
             int index=0;
             html=Regex.Replace(html,"data-json='\\{",m=>{
-                var frame=frames[Math.Min(index++,frames.Length-1)];
+                if(frames[Math.Min(index++,frames.Length-1)] is not { } frame)return m.Value;
                 return "data-json='{\"torbox_preview\":true,\"season\":"+frame.Season+",\"episode\":"+frame.Episode+",";
             });
         }
@@ -523,7 +523,7 @@ public partial class TorBoxController
     }
 
     [HttpGet, Route("lite/torbox/choose")]
-    public Task<ActionResult> Choose(string pick, long file=-1, int audio=-1, int sub=-2, int resolution=-1) => Guard(async(c,key)=>{
+    public Task<ActionResult> Choose(string pick, long file=-1, int audio=-1, int sub=-2, int resolution=-1, int season=0) => Guard(async(c,key)=>{
         var requested=GetPick(pick);
         if(!await requested.Gate.WaitAsync(TimeSpan.FromSeconds(2),HttpContext.RequestAborted))return Error(429,"TorBox уже обрабатывает эту раздачу");
         (string Ticket, Pick Selection, JToken Torrent)? ready;
@@ -540,7 +540,7 @@ public partial class TorBoxController
         var files=(t["files"] as JArray??new JArray()).Where(f=>VideoName(FileName(f))).OrderByDescending(f=>(long?)f["size"]??0).ToArray();
         if(files.Length==0)return Error(404,"В раздаче нет видеофайлов");
         string preferenceNotice=null;
-        ActionResult Menu(SimilarTpl menu,params (int Season,int Episode)[] frames) {
+        ActionResult Menu(SimilarTpl menu,params (int Season,int Episode)?[] frames) {
             var result=(ContentResult)Similar(menu,frames);
             result.Content=ChosenHtml(result.Content,p,requested,files.FirstOrDefault(f=>(long?)f["id"]==file) is JToken selectedFile?FileName(selectedFile):null,preferenceNotice);
             return result;
@@ -555,12 +555,29 @@ public partial class TorBoxController
             }
             if(file<0){
                 var episodeTpl=new SimilarTpl();
+                var frames=new List<(int Season,int Episode)?>();
+                string episodeRoute="choose?pick="+pick;
+                if(season>0) {
+                    episodes=episodes.Where(e=>e.Season==season).ToList();
+                    if(episodes.Count==0)return Error(404,"В раздаче нет выбранного сезона");
+                    episodeTpl.Append("Все сезоны",null,null,OnlineUrl(episodeRoute));
+                    frames.Add(null);
+                } else {
+                    var seasons=episodes.Select(e=>e.Season).Distinct().ToArray();
+                    if(seasons.Length>1)
+                        foreach(int number in seasons) {
+                            episodeTpl.Append("Открыть сезон "+number,null,null,OnlineUrl(episodeRoute+"&season="+number));
+                            frames.Add(null);
+                        }
+                }
                 await NameEpisodes(episodes,p.Film?.tmdb_id??0);
                 foreach(var group in episodes.GroupBy(e=>(e.Season,e.Episode)))
-                    foreach(var episode in group)
+                    foreach(var episode in group) {
                         episodeTpl.Append(EpisodeTitle(episode)+(episode.DisplayName!=null && group.Count()>1?" · "+episode.Name:""),null,null,
                             OnlineUrl("choose?pick="+pick+"&file="+episode.File));
-                return Menu(episodeTpl,episodes.Select(e=>(e.Season,e.Episode)).ToArray());
+                        frames.Add((episode.Season,episode.Episode));
+                    }
+                return Menu(episodeTpl,frames.ToArray());
             }
             if(!episodes.Any(e=>e.File==file))return Error(400,"Выбранный файл не распознан как серия");
         }

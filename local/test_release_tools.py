@@ -23,7 +23,9 @@ with tempfile.TemporaryDirectory() as folder:
     target.parent.mkdir(parents=True)
     target.write_text('verified code')
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
-    (release / 'overlay.sha256').write_text(f'{digest}  module/Online/plugin.js\n')
+    (app / 'Shared.dll').write_bytes(b'fixture shared')
+    shared_digest = hashlib.sha256((app / 'Shared.dll').read_bytes()).hexdigest()
+    (release / 'overlay.sha256').write_text(f'{digest}  module/Online/plugin.js\n{shared_digest}  Shared.dll\n')
     (release / 'version.txt').write_text('custom-test')
     (app / 'version.txt').write_text('custom-test')
     (app / 'excludes.conf').write_text('private.json\noptional.json\n')
@@ -42,7 +44,7 @@ with tempfile.TemporaryDirectory() as folder:
     (app / 'version.txt').write_text('stock-test')
     check.out.clear(); check.verify_release()
     assert any('version differs' in msg for _, msg in check.out)
-    for path in ('../private.json', 'module/../private.json', '/etc/passwd', 'module//bad'):
+    for path in ('../private.json', 'module/../private.json', '/etc/passwd', 'module//bad', 'Core.dll'):
         (release / 'overlay.sha256').write_text(f'{digest}  {path}\n')
         check.out.clear(); assert check.release_hashes() == {}
     (release / 'overlay.sha256').write_text(f'{digest}  module/Online/plugin.js\n' * 2)

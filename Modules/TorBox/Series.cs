@@ -114,7 +114,7 @@ public partial class TorBoxController
     static async Task NameEpisodes(List<SeriesEpisode> episodes,long tmdb) {
         if(tmdb<=0 || !KinoApi.Enabled)return;
 
-        // A season pack normally needs one lookup. Limit lookups for multi-season packs.
+        // The full list names up to four seasons. A season view passes only its own episodes.
         var seasons=episodes.Where(e=>e.Numbered).GroupBy(e=>e.Season).Take(4);
         await Task.WhenAll(seasons.Select(async season=>{
             var names=await KinoApi.Episodes(tmdb,season.Key);

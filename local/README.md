@@ -12,6 +12,10 @@ The upstream ZIP is cached by its full download URL under
 `${XDG_CACHE_HOME:-$HOME/.cache}/lampac-build/` (override with `LAMPAC_BUILD_CACHE`).
 Each reuse verifies its saved SHA-256. A missing or damaged entry is downloaded
 again; interrupted/invalid downloads are not cached. Concurrent builds share a lock.
+If `Shared/` or its build props differ from the upstream base, the builder uses
+the .NET 10 SDK to compile `Shared.dll` from the selected ref and records the DLL
+in the overlay manifest. Set `DOTNET` to the SDK executable if needed. Set
+`LAMPAC_DIST_DIR` to build a candidate without overwriting the files in `dist/`.
 Upload all three files in `dist/` to the custom release. Never publish an archive
 built from an older ref while uncommitted runtime patches are installed.
 
@@ -91,6 +95,34 @@ Apple TV account binding and rollback requirements. Custom tags are excluded
 from the upstream Build workflow to protect the assembled custom ZIP.
 
 ## Media components
+
+### KinoAPI on a systemd host
+
+KinoAPI is optional. Save the key as a single line in `/etc/lampac-kinoapi.key`
+with owner `root` and mode `0600`. Use
+`/etc/systemd/system/lampac.service.d/30-kinoapi.conf`:
+
+```ini
+[Service]
+LoadCredential=kinoapi:/etc/lampac-kinoapi.key
+```
+
+Run `systemctl daemon-reload` after changing the drop-in and restart
+`lampac.service`. For key rotation, replace the source file and restart the
+service so systemd loads the new value. For a configured installation, check
+`journalctl -u lampac.service` for KinoAPI warnings and use a known title in
+Lampa to verify the poster. Request failures log only the error category or
+HTTP status, at most once per minute.
+
+The default base URL is `https://kinoapi.lampac.dev/api/v1/`. Set
+`LAMPAC_KINOAPI_BASE_URL` in the service environment for a trusted compatible
+endpoint. HTTPS is required outside loopback. If Lampac's `globalproxy` matches
+that base URL, KinoAPI uses the selected proxy for the life of its HTTP client.
+Otherwise the client uses the system proxy settings. Changes to these settings
+take effect after a service restart. CI uses `--kino-mock` with the matching
+release runtime, a synthetic key, and a local fixture.
+
+### Playback and metadata
 
 Tracks bounds ffprobe waiting/execution to 30 seconds by default (operator setting
 `Tracks.ffprobe_timeout_seconds`, clamped to 1–120). Successful probes are cached;

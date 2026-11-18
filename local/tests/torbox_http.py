@@ -2,13 +2,13 @@ from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor
 import json, shutil, subprocess, urllib.request, urllib.parse, urllib.error, threading, time, re, os
-# Only a public release runtime and synthetic accounts are used. No running service is read.
+# Use a staged release and synthetic accounts. No running service is read.
 import argparse, socket, sqlite3, tempfile
 parser = argparse.ArgumentParser(description="Isolated TorBox HTTP regression checks")
-parser.add_argument("--runtime", required=True, type=Path, help="extracted public Lampac release (Core.dll + runtimes/)")
+parser.add_argument("--runtime", required=True, type=Path, help="extracted Lampac release (Core.dll, Shared.dll, runtimes/)")
 parser.add_argument("--dotnet", default=shutil.which("dotnet"), help="dotnet executable when it is not on PATH")
 parser.add_argument("--module-dir", type=Path, default=Path(__file__).resolve().parents[2] / "Modules/TorBox", help="TorBox sources, including an extracted release module")
-parser.add_argument("--kino-credentials", type=Path, help="optional directory containing a KinoAPI test credential named kinoapi")
+parser.add_argument("--kino-mock", action="store_true", help="exercise KinoAPI using a local fixture and the matching Shared.dll")
 args = parser.parse_args()
 if not args.dotnet:
     parser.error("dotnet is not on PATH; supply --dotnet")
@@ -37,12 +37,17 @@ cfg = {"listen": {"ip": "127.0.0.1", "port": app_port, "localhost": "127.0.0.1",
        "BaseModule": {"LoadModules": [".*"], "SkipModules": []},
        "accsdb": {"enable": True, "accounts": {user: "2099-01-01T00:00:00" for user in [uid, second, outsider]}},
        "WAF": {"enable": False}, "openstat": {"enable": False}, "chromium": {"enable": False}, "serilog": False}
-if args.kino_credentials:
+if args.kino_mock:
     cfg["PidTor"] = {"enable": True, "emptyVoice": True, "min_sid": 0, "redapi": mock_url, "torrs": [mock_url]}
+    cfg["globalproxy"] = [{"pattern": "^" + re.escape(mock_url + "/api/v1/"), "list": [mock_url], "BypassOnLocal": False}]
     for name, source in [("Online", repo / "Online"), ("PidTor", repo / "Modules/PidTor")]:
         shutil.copytree(source, p / "module" / name, ignore=shutil.ignore_patterns("bin", "obj"))
     (p / "data").mkdir()
     (p / "data/externalids.json").write_text("{}")
+    credentials = p / "credentials"
+    credentials.mkdir(mode=0o700)
+    (credentials / "kinoapi").write_text("fixture-kino-credential")
+    (credentials / "kinoapi").chmod(0o600)
 (p / "init.conf").write_text(json.dumps(cfg))
 os.chmod(p / "init.conf", 0o600)
 shutil.copytree(args.module_dir, p / "mods/TorBox")
@@ -145,6 +150,8 @@ class Mock(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urllib.parse.urlsplit(self.path)
         q = urllib.parse.parse_qs(u.query)
+        if u.path.startswith("/api/v1/"):
+            return self.kino(u.path, q)
         if u.path.endswith("/indexers/all/results"):
             state["parser_calls"] += 1
             if state.get("kino_search"):
@@ -194,6 +201,34 @@ class Mock(BaseHTTPRequestHandler):
             height = 2160 if state["metadata_mode"] == "height" and newer else 1080
             return self.respond({"success": True, "data": {"metadata": {"video": {"height": height}, "audios": audios, "subtitles": [subRu]}, "hls_url": "https://media.example/" + q["id"][0] + "/" + q["file_id"][0] + ".m3u8"}})
         raise AssertionError(u.path)
+
+    def kino(self, path, query):
+        assert self.headers.get("X-API-Key") == "fixture-kino-credential"
+        assert self.path.startswith(mock_url + "/api/v1/"), "KinoAPI fixture must receive the proxied absolute URL"
+        state.setdefault("kino_requests", []).append(path)
+        season = re.fullmatch(r"/api/v1/tv/by/tmdb/1418/seasons/([1-6])/episodes", path)
+        if season:
+            number = int(season[1])
+            title = "Пилотная серия" if number == 1 else f"Название серии сезона {number}"
+            return self.respond({"data": [{"episode_number": 1, "name_ru": title}]})
+        cards = {
+            "550": (550, "tt0137523", 361, "movie", "Бойцовский клуб", "Fight Club", 1999),
+            "361": (550, "tt0137523", 361, "movie", "Бойцовский клуб", "Fight Club", 1999),
+            "1418": (1418, "tt0898266", 306084, "tv", "Теория большого взрыва", "The Big Bang Theory", 2007),
+            "4242": (4242, "tt9876543210", 987654321, "movie", "Фильм", "Movie", 2001),
+        }
+        card = cards.get(path.rsplit("/", 1)[-1])
+        if not card:
+            return self.respond({}, 404)
+        tmdb, imdb, kp, kind, ru, original, year = card
+        assert query == {"type": [kind], "include": ["images"]}
+        if tmdb == 4242:
+            time.sleep(.2)
+        return self.respond({"data": {
+            "id": {"tmdb": tmdb, "imdb": imdb, "kinopoisk": kp}, "type": kind,
+            "title": {"ru": ru, "original": original}, "release": {"year": year},
+            "images": {"kinopoisk": {"poster": f"https://kinopoiskapiunofficial.tech/images/posters/kp/{kp}.jpg"}},
+        }})
 
     def do_POST(self):
         u = urllib.parse.urlsplit(self.path)
@@ -259,8 +294,11 @@ log = (p / "probe-server.log").open("w")
 def start():
     global proc
     env = os.environ.copy()
-    if args.kino_credentials:
-        env["CREDENTIALS_DIRECTORY"] = str(args.kino_credentials.resolve())
+    env.pop("CREDENTIALS_DIRECTORY", None)
+    env.pop("LAMPAC_KINOAPI_BASE_URL", None)
+    if args.kino_mock:
+        env["CREDENTIALS_DIRECTORY"] = str(credentials)
+        env["LAMPAC_KINOAPI_BASE_URL"] = mock_url + "/api/v1/"
     proc = subprocess.Popen([args.dotnet, "Core.dll"], cwd=p, stdout=log, stderr=subprocess.STDOUT, env=env)
     for _ in range(100):
         try:
@@ -300,19 +338,33 @@ try:
         lib.unlink()
     start()
     check("current module compiles", True)
-    if args.kino_credentials:
+    if args.kino_mock:
         code, ids = api("/externalids?id=KP_361&serial=0")
-        check("KinoAPI resolves the numeric suffix of a KP_ identifier",
+        check("KinoAPI resolves the numeric suffix of a KP_ identifier through Lampac globalproxy",
               code == 200 and ids == {"imdb_id": "tt0137523", "kinopoisk_id": "361"})
         code, poster = api("/kino/poster?id=550&serial=0&source=tmdb")
         check("KinoAPI returns the Kinopoisk poster", code == 200 and poster.get("poster", "").endswith("/kp/361.jpg"))
         code, poster = api("/kino/poster?id=550&serial=0&source=tmdb&kinopoisk_id=301")
-        check("conflicting IDs do not replace the poster", code == 200 and poster.get("poster") is None)
+        check("cached title is reused and conflicting IDs do not replace the poster",
+              code == 200 and poster.get("poster") is None and state["kino_requests"].count("/api/v1/titles/by/tmdb/550") == 1)
         code, ids = api("/externalids?id=1418&serial=1&source=tmdb")
         check("KinoAPI maps TMDB to IMDb and Kinopoisk", code == 200 and ids.get("imdb_id") == "tt0898266" and str(ids.get("kinopoisk_id")) == "306084")
         with sqlite3.connect(p / "cache/Externalids.sql") as db:
-            table, = db.execute("SELECT name FROM sqlite_schema WHERE type='table' AND lower(name) IN ('imdb', 'externalidssqlmodel')").fetchone()
-            check("confirmed KinoAPI IMDb mapping is persisted", db.execute(f"SELECT value FROM {table} WHERE id=?", ("1418_1",)).fetchone() == ("tt0898266",))
+            check("confirmed KinoAPI IMDb mapping is persisted", db.execute("SELECT value FROM ExternalidsSqlModel WHERE id=?", ("1418_1",)).fetchone() == ("tt0898266",))
+            db.executemany("INSERT INTO ExternalidsSqlModel (id, value) VALUES (?, ?)", [("4242_0", ""), ("tt9876543210", "0")])
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            concurrent = list(pool.map(lambda i: api(f"/externalids?id=fixture-{i}&tmdb_id=4242"), range(8)))
+        check("concurrent lookups all resolve IDs and share a single upstream request",
+              all(reply == (200, {"imdb_id": "tt9876543210", "kinopoisk_id": "987654321"}) for reply in concurrent)
+              and state["kino_requests"].count("/api/v1/titles/by/tmdb/4242") == 1)
+        with sqlite3.connect(p / "cache/Externalids.sql") as db:
+            check("both SQLite placeholders are replaced after concurrent lookups",
+                  db.execute("SELECT value FROM ExternalidsSqlModel WHERE id='4242_0'").fetchone() == ("tt9876543210",) and
+                  db.execute("SELECT value FROM ExternalidsSqlModel WHERE id='tt9876543210'").fetchone() == ("987654321",))
+        for _ in range(2):
+            code, poster = api("/kino/poster?id=777777&source=tmdb")
+            assert code == 200 and poster.get("poster") is None
+        check("KinoAPI 404 is cached", state["kino_requests"].count("/api/v1/titles/by/tmdb/777777") == 1)
         query = "?" + urllib.parse.urlencode({"serial": 1, "title": "Fixture Alternative", "year": 2007, "tmdb_id": 1418, "rjson": "true"})
         state["kino_search"] = ["start"]
         code, html = get("/lite/torbox" + query)
@@ -328,6 +380,36 @@ try:
         code, _ = get("/lite/torbox" + query + "&clarification=1")
         check("manual search remains unchanged", code == 404 and state["kino_search"][5:] == ["Fixture Alternative"])
         state.pop("kino_search")
+        reset()
+
+        # Let the earlier fixture requests leave the integration's one-second rate window.
+        time.sleep(1.1)
+        initial_torrent = items[10]
+        items[10] = dict(initial_torrent, files=[
+            {"id": season, "name": f"Multi.Pack.S{season:02}E01.mkv"} for season in range(1, 7)
+        ])
+        rows[:] = [dict(row(A), Title="Multi Pack 1080p")]
+        code, html = get("/lite/torbox?title=Multi%20Pack&serial=1&tmdb_id=1418")
+        assert code == 200
+        ticket = re.search(r"choose\?pick=([a-f0-9]{32})", html)[1]
+        code, html = get("/lite/torbox/choose?pick=" + ticket)
+        check("full TorBox pack exposes every season and localizes only the first four",
+              code == 200 and "Открыть сезон 6" in html and "Название серии сезона 4" in html
+              and "Multi.Pack.S06E01.mkv" in html and "Название серии сезона 6" not in html
+              and "/api/v1/tv/by/tmdb/1418/seasons/6/episodes" not in state["kino_requests"])
+        before = len(state["kino_requests"])
+        code, html = get("/lite/torbox/choose?pick=" + ticket + "&season=6")
+        check("opening season six fetches only its title data and lists only its episodes",
+              code == 200 and "Название серии сезона 6" in html and "Все сезоны" in html
+              and "Пилотная серия" not in html and "file=6" in html
+              and state["kino_requests"][before:] == ["/api/v1/tv/by/tmdb/1418/seasons/6/episodes"])
+        nav, episode = [json.loads(raw) for raw in re.findall(r"data-json='([^']+)'", html)]
+        check("season navigation uses a folder and the episode keeps its preview coordinates",
+              not nav.get("torbox_preview") and episode.get("torbox_preview")
+              and (episode.get("season"), episode.get("episode")) == (6, 1))
+        code, _ = get("/lite/torbox/choose?pick=" + ticket + "&season=99")
+        check("a season missing from the pack gets a 404", code == 404)
+        items[10] = initial_torrent
         reset()
 
     search = "/lite/torbox?title=Mock%20Empty"

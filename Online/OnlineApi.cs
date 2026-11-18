@@ -255,12 +255,18 @@ public class OnlineApiController : BaseController
 
         string tmdbKey = ids.Tmdb > 0 ? $"{ids.Tmdb}_{serial}" : null;
         string kpid = kinopoisk_id > 0 ? kinopoisk_id.ToString() : null;
-        if (string.IsNullOrWhiteSpace(imdb_id))
+        static bool Missing(string value) => string.IsNullOrWhiteSpace(value) || value == "0";
+        if (Missing(imdb_id))
         {
             if (kpid != null)
-                imdb_id = externalids.FirstOrDefault(pair => pair.Value == kpid).Key ??
-                    sqlDb.kinopoisk.FirstOrDefault(row => row.value == kpid)?.Id;
-            imdb_id ??= tmdbKey != null ? sqlDb.imdb.Find(tmdbKey)?.value : null;
+            {
+                imdb_id = externalids.FirstOrDefault(pair => pair.Value == kpid && !Missing(pair.Key)).Key;
+                imdb_id ??= sqlDb.kinopoisk.FirstOrDefault(row => row.value == kpid && row.Id != "" && row.Id != "0")?.Id;
+            }
+            if (Missing(imdb_id) && tmdbKey != null)
+                imdb_id = sqlDb.imdb.Find(tmdbKey)?.value;
+            if (Missing(imdb_id))
+                imdb_id = null;
         }
 
         string LocalKp(string imdb)
@@ -268,7 +274,8 @@ public class OnlineApiController : BaseController
             if (string.IsNullOrWhiteSpace(imdb))
                 return null;
             externalids.TryGetValue(imdb, out string mapped);
-            return mapped is not (null or "" or "0") ? mapped : sqlDb.kinopoisk.Find(imdb)?.value;
+            string value = Missing(mapped) ? sqlDb.kinopoisk.Find(imdb)?.value : mapped;
+            return Missing(value) ? null : value;
         }
 
         kpid ??= LocalKp(imdb_id);
@@ -281,7 +288,7 @@ public class OnlineApiController : BaseController
             {
                 imdb_id = foundImdb;
                 if (tmdbKey != null)
-                    sqlDb.imdb.Add(new ExternalidsSqlModel { Id = tmdbKey, value = imdb_id });
+                    await sqlDb.SaveMapping(tmdbKey, imdb_id);
             }
             if (kpid is null or "" or "0")
             {
@@ -289,14 +296,8 @@ public class OnlineApiController : BaseController
                 if ((kpid is null or "" or "0") && foundKp > 0 && !string.IsNullOrWhiteSpace(imdb_id) && imdb_id == foundImdb)
                 {
                     kpid = foundKp.ToString();
-                    if (sqlDb.kinopoisk.Find(imdb_id) == null)
-                        sqlDb.kinopoisk.Add(new ExternalidsSqlModel { Id = imdb_id, value = kpid });
+                    await sqlDb.SaveMapping(imdb_id, kpid);
                 }
-            }
-            if (sqlDb.ChangeTracker.HasChanges())
-            {
-                await sqlDb.SaveChangesLocks();
-                sqlDb.ChangeTracker.Clear();
             }
         }
 
@@ -310,11 +311,7 @@ public class OnlineApiController : BaseController
                 await Http.GetSpan($"http://api.themoviedb.org/3/{cat}/{ids.Tmdb}?api_key={CoreInit.conf.cub.api_key}&append_to_response=external_ids", timeoutSeconds: 5,
                     spanAction: json => imdb_id = Rx.Match(json, "\"imdb_id\":\"(tt[0-9]+)\""));
                 if (!string.IsNullOrEmpty(imdb_id))
-                {
-                    sqlDb.imdb.Add(new ExternalidsSqlModel { Id = tmdbKey, value = imdb_id });
-                    await sqlDb.SaveChangesLocks();
-                    sqlDb.ChangeTracker.Clear();
-                }
+                    await sqlDb.SaveMapping(tmdbKey, imdb_id);
             }
         }
 
@@ -345,11 +342,8 @@ public class OnlineApiController : BaseController
                     }
                 }
 
-                if (kpid != null && sqlDb.kinopoisk.Find(imdb_id) == null)
-                {
-                    sqlDb.kinopoisk.Add(new ExternalidsSqlModel { Id = imdb_id, value = kpid });
-                    await sqlDb.SaveChangesLocks();
-                }
+                if (!Missing(kpid))
+                    await sqlDb.SaveMapping(imdb_id, kpid);
             }
         }
 

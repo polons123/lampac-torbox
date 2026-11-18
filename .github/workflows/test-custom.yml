@@ -16,6 +16,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v7.1.0
         with:
           node-version: '22'
@@ -39,28 +41,43 @@ jobs:
         run: sudo python3 -m unittest local.test_deploy.DeployPermissionTests
       - name: External playlist permission and revocation
         run: python3 local/tests/torbox_external.py
-      - name: Download public runtime
+      - name: Download and verify the upstream archive
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download "$(cat local/base)" --repo lampac-nextgen/lampac --pattern lampac-nextgen.zip --dir "$RUNNER_TEMP/lampac-public"
           gh api "repos/lampac-nextgen/lampac/releases/tags/$(cat local/base)" > "$RUNNER_TEMP/lampac-public/release.json"
           python3 - <<'PY'
-          import hashlib, json, os, pathlib, zipfile
+          import hashlib, json, os, pathlib, shutil
           root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'lampac-public'
           asset = next(a for a in json.loads((root/'release.json').read_text())['assets'] if a['name'] == 'lampac-nextgen.zip')
           archive = root/'lampac-nextgen.zip'
           digest = 'sha256:' + hashlib.file_digest(archive.open('rb'), 'sha256').hexdigest()
           assert asset.get('digest') == digest, 'official asset digest mismatch or absent'
-          with zipfile.ZipFile(archive) as z:
-              for item in z.infolist():
+          cache = root / 'cache'
+          cache.mkdir()
+          tag = pathlib.Path('local/base').read_text().strip()
+          url = f'https://github.com/lampac-nextgen/lampac/releases/download/{tag}/lampac-nextgen.zip'
+          key = hashlib.sha256(url.encode()).hexdigest()
+          shutil.copyfile(archive, cache / f'{key}.zip')
+          (cache / f'{key}.sha256').write_text(digest.removeprefix('sha256:') + '\n')
+          PY
+      - name: Build and verify the runtime for this commit
+        run: |
+          LAMPAC_BUILD_CACHE="$RUNNER_TEMP/lampac-public/cache" bash local/build-release.sh "$(cat local/base)"
+          python3 - <<'PY'
+          import os, pathlib, zipfile
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'lampac-public' / 'runtime'
+          with zipfile.ZipFile('dist/lampac-nextgen.zip') as archive:
+              for item in archive.infolist():
                   path = pathlib.PurePosixPath(item.filename)
                   assert not path.is_absolute() and '..' not in path.parts, 'unsafe archive path'
-              z.extractall(root/'runtime')
+              archive.extractall(root)
           PY
+          (cd "$RUNNER_TEMP/lampac-public/runtime" && sha256sum --strict -c "$GITHUB_WORKSPACE/dist/overlay.sha256")
       - name: Native Apple TV authorization and TimeCode migration
         run: python3 local/tests/native_sync_http.py --runtime "$RUNNER_TEMP/lampac-public/runtime"
       - name: Media probe and PidTor regression
         run: python3 local/tests/media_http.py --runtime "$RUNNER_TEMP/lampac-public/runtime"
       - name: TorBox browser and playback regression
-        run: python3 local/tests/torbox_http.py --runtime "$RUNNER_TEMP/lampac-public/runtime"
+        run: python3 local/tests/torbox_http.py --runtime "$RUNNER_TEMP/lampac-public/runtime" --kino-mock
