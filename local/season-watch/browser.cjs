@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const delay = ms => new Promise(r => setTimeout(r,ms));
 (async function () {
     const dir='/opt/lampac/wwwroot/lampa-main';
-    let actions = 0;
+    let actions = 0, previews = 0, identities = 0;
     const deletions=[],gone=new Set();
     let checks=0;
     let infuseMedia=false, incomplete=false;
@@ -18,7 +18,7 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
     const server=http.createServer((q,r)=>{
         const route=new URL(q.url,'http://localhost').pathname;
         if(route==='/season-watch/list') {r.setHeader('Content-Type','application/json');return r.end(JSON.stringify(fixture));}
-        if(route==='/season-watch/catalog') {r.setHeader('Content-Type','application/json');return r.end(JSON.stringify({cards:['peer','home','box'].map((place,i)=>({place,hash:String(i).repeat(40),box_id:place==='box'?77:null,title:'Test '+place,label:'1080p',poster:'',year:'2026',movie:i===1,seasons:i===1?[]:[{n:2,ready:[3],waiting:[],tmdb:3}]})).filter(c=>!gone.has(c.place)),errors:{}}));}
+        if(route==='/season-watch/catalog') {r.setHeader('Content-Type','application/json');return r.end(JSON.stringify({cards:['peer','home','box'].map((place,i)=>({place,hash:String(i).repeat(40),box_id:place==='box'?77:null,identities:place==='peer' && !identities?[{value:'22',label:'Show (2024)'}]:[],title:'Test '+place,label:'1080p',poster:'',year:'2026',movie:i===1,seasons:i===1?[]:[{n:2,ready:[3],waiting:[],tmdb:3}]})).filter(c=>!gone.has(c.place)),errors:{}}));}
         if(route==='/season-watch/remove' || route==='/season-watch/remove/check') {
             let data='';q.on('data',c=>data+=c);q.on('end',()=>{
                 const body=JSON.parse(data);r.setHeader('Content-Type','application/json');
@@ -52,7 +52,18 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
             return r.end(JSON.stringify({movie,files,box_id:place==='box'?77:null}));
         }
         if(route==='/torbox/play') {r.setHeader('Content-Type','application/json');return r.end('{"success":true,"url":"https://fixture.invalid/box"}');}
-        if(route==='/season-watch/update') {actions++;r.setHeader('Content-Type','application/json');return r.end('{"message":"Раздача обновлена","hash":"abcd"}');}
+        if(route==='/season-watch/update' || route==='/season-watch/identity') {
+            let raw='';q.on('data',c=>raw+=c);q.on('end',()=>{
+                const body=JSON.parse(raw);r.setHeader('Content-Type','application/json');
+                if(route.endsWith('/identity')){
+                    assert.equal(body.identity,22);identities++;return r.end(JSON.stringify({hash:body.hash,message:'TMDB'}));
+                }
+                if(!body.confirmation){
+                    previews++;return r.end(JSON.stringify({offer:{label:'New 1080p',season:2,ready:[3],versions:[{hash:body.hash,label:'Old 1080p'}]},confirmation:'c'.repeat(64)}));
+                }
+                assert.equal(body.confirmation,'c'.repeat(64));actions++;r.end(JSON.stringify({message:'Раздача обновлена',hash:'abcd'}));
+            });return;
+        }
         if(route==='/lampainit.js') {r.setHeader('Content-Type','application/javascript');return r.end('');}
         const p=path.join(dir,route);
         if(!p.startsWith(dir+'/') || !fs.existsSync(p)||!fs.statSync(p).isFile()){r.statusCode=404;return r.end();}
@@ -103,6 +114,17 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
         await until("playCalls.includes('https://fixture.invalid/box')");
         await openCard('h2nexus-p');
         await ev("testMenus.at(-1).onSelect(testMenus.at(-1).items.find(x=>x.title==='Обновить'))");
+        const choose=label=>ev("testMenus.at(-1).onSelect(testMenus.at(-1).items.find(x=>x.title==="+JSON.stringify(label)+"))");
+        await until("testMenus.at(-1).items.some(x=>x.title==='Подтвердить замену')");
+        assert.equal(actions,0);
+        assert(await ev("testMenus.at(-1).items[1].subtitle.includes('Old 1080p') && testMenus.at(-1).items[1].subtitle.includes('S02E03')"));
+        await choose('Отмена');assert.equal(actions,0);
+        await choose('Выбрать сериал в TMDB');await choose('Show (2024)');
+        for(let i=0;i<30&&!identities;i++)await delay(100);
+        assert.equal(identities,1);await delay(300);
+        await openCard('h2nexus-p');await choose('Обновить');
+        await until("testMenus.at(-1).items.some(x=>x.title==='Подтвердить замену')");
+        await choose('Подтвердить замену');assert.equal(previews,2);
         await until("$('.all-releases-card').length===3");
         for(let i=0;i<30&&!actions;i++)await delay(100);
         if(!actions) console.log(await ev("({notes,active:Lampa.Activity.active()?.component,menus:testMenus.map(x=>x.title),urls:performance.getEntriesByType('resource').filter(x=>x.name.includes('season-watch')).map(x=>new URL(x.name).pathname)})"));

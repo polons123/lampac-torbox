@@ -1,4 +1,5 @@
 import datetime as dt
+from copy import deepcopy
 import fcntl
 import json
 import os
@@ -7,14 +8,14 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from providers import HASH, NAMES, VIDEO, Providers, Unavailable, digest, episode_files, season_hint
+from providers import BAD, HASH, NAMES, VIDEO, Providers, Unavailable, digest, episode_files, season_hint
 from urllib.parse import quote, urlsplit
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = Path('/var/lib/season-watch')
 STATE = ROOT / 'state.json'
 TODAY = lambda: dt.datetime.now(dt.timezone.utc).date().isoformat()
-ERRORS = (Unavailable, OSError, ValueError, TypeError, KeyError)
+ERRORS = (Unavailable, OSError, ValueError, TypeError, KeyError, AttributeError, IndexError)
 
 def atomic(path, value):
     fd, name = tempfile.mkstemp(dir=path.parent)
@@ -108,8 +109,9 @@ def examine(p,st,t,w,old,interactive=False,selection=''):
             show=p.calendar(f"tv/{w['tmdb']}")
             later=(show.get('last_episode_to_air') or {}).get('season_number') or 0
             if not interactive and (show.get('status') in ('Ended','Canceled') or later>season): return
-    except ERRORS:
-        w['detail']='Календарь временно недоступен'
+    except ERRORS as exc:
+        if not interactive: raise
+        w['detail']=optional_label(exc)
     if not t['title'] and not show:
         show=p.calendar(f"tv/{w['tmdb']}")
     w['title']=t['title'] or show.get('name') or w['title']
@@ -176,7 +178,10 @@ def item_rows(p,st,t,place,force=False):
             try:
                 examine(p,st,t,w,old)
             except ERRORS as exc:
-                w['detail']=optional_label(exc)
+                print(f'{place} season lookup: {type(exc).__name__}',file=sys.stderr)
+                previous=st['watches'].get(w['id'],w)
+                w=dict(previous)
+                mark_stale(w,optional_label(exc))
         out.append(w)
     return out
 
@@ -184,8 +189,8 @@ def make_row(t,place,season,detail):
     return dict(id=item_id(place,t['hash'],season),place=place,hash=t['hash'],title=display_name(t),
         label=t['label'][:360],season=season,ready=[],waiting=[],owned=[],choices=[],identities=[],detail=detail)
 
-def invalidated(row, reason):
-    row.update(ready=[],choices=[],identities=[],detail=reason)
+def mark_stale(row, reason):
+    row.update(stale=True,detail=reason)
     row.pop('candidate',None)
 
 def scan(p,st):
@@ -203,10 +208,12 @@ def scan(p,st):
         now=int(time.time())
         try:
             inventory=p.inventory(place)
+            cards=[card(t,place) for t in inventory]
         except ERRORS as err:
+            print(f'{place} inventory: {type(err).__name__}',file=sys.stderr)
             st['checked'][place]={'error':optional_label(err),'time':now}
             for w in st['watches'].values():
-                if w['place']==place: invalidated(w,'Источник недоступен. Сохранён предыдущий календарь')
+                if w['place']==place: mark_stale(w,'Источник недоступен. Сохранён предыдущий календарь')
             continue
         available={t['hash'] for t in inventory}
         for retired in list(st['replaced']):
@@ -214,7 +221,7 @@ def scan(p,st):
             # The old copy remains archived until it actually leaves this provider.
             if site==place and old not in available:
                 unlink_version(st,site,old)
-        st.setdefault('catalog',{})[place]=[card(t,place) for t in inventory]
+        st.setdefault('catalog',{})[place]=cards
         st['totals'][place]=len(inventory)
         fresh={}
         for t in inventory:
@@ -224,13 +231,32 @@ def scan(p,st):
                 rows=[r.copy() for r in st['watches'].values() if r['place']==place and r['hash']==t['hash']]
                 if not rows:
                     rows=[make_row(t,place,season_hint(t['label']) or 0,'')]
-                for r in rows: invalidated(r,optional_label(err))
-            for w in rows: fresh[w['id']]=w
+                for r in rows: mark_stale(r,optional_label(err))
+            for w in rows:
+                if not w.get('stale'): w['asof']=now
+                fresh[w['id']]=w
         st['watches']={k:v for k,v in st['watches'].items() if v['place']!=place}
         st['watches'].update(fresh)
         st['checked'][place]={'time':now}
         save(st)
     st['last']=int(time.time())
+    prune(st)
+
+def prune(st):
+    catalog=st.get('catalog',{})
+    if any(place not in catalog or st['checked'].get(place,{}).get('error') for place in NAMES):
+        return
+    if st.get('removal_groups') or st.get('deletions'): return
+    active={row['hash'] for rows in catalog.values() for row in rows}
+    for field in ('files','identities'):
+        st[field]={h:value for h,value in st[field].items() if h in active}
+    valid=set(st['watches'])
+    for place,rows in catalog.items():
+        for row in rows:
+            h=row['hash']
+            valid.add(item_id(place,h,0))
+            valid.update(item_id(place,h,int(n)) for n in st['files'].get(h,{}))
+    st['sources']={k:v for k,v in st['sources'].items() if k in valid}
 
 def save(st):
     # Convert season keys to a common on-disk representation on every write.
@@ -246,11 +272,39 @@ def save(st):
 def revision(w):
     return digest(json.dumps([w['hash'],w.get('candidate'),w['ready'],w['choices'],w['identities']],sort_keys=True))[:32]
 
+def episode_numbers(files,hint,strict=False):
+    numbers=set()
+    for f in files:
+        name=f.get('path') or f.get('name') or ''
+        if not VIDEO.search(name) or BAD.search(name): continue
+        parsed=episode_files([f],hint)
+        if strict and not parsed:
+            raise Unavailable('Не удалось определить номер старой серии. Замена остановлена')
+        numbers.update((int(s),int(e)) for s,episodes in parsed.items() for e in episodes)
+    return numbers
+
+def media_files(p,place,row):
+    return row['files'] or (p.ts_files(place,row['hash']) if place!='box' else [])
+
+def required_episodes(p,place,rows,season):
+    required=set()
+    for row in rows:
+        files=media_files(p,place,row)
+        if season or row['tv'] or not row['movie']:
+            hint=season_hint(row['label'])
+            numbers=episode_numbers(files,hint)
+            if numbers or season or row['tv'] or hint:
+                numbers=episode_numbers(files,hint,strict=True)
+                if not numbers: raise Unavailable('Нет списка серий старой раздачи')
+                required.update(numbers)
+            elif sum(bool(VIDEO.search(f.get('path') or f.get('name') or '')) for f in files)!=1:
+                raise Unavailable('Не удалось определить состав старой раздачи')
+    return required
+
 def destination_has(files,w):
-    if not w['season']:
+    if not w['season'] and not w.get('required'):
         return any(VIDEO.search(f.get('path') or f.get('name') or '') for f in files)
-    episodes=episode_files(files,w['season']).get(w['season'],{})
-    return bool(w['ready']) and all(str(n) in episodes for n in w['ready'])
+    return set(w['required']).issubset(episode_numbers(files,season_hint(w.get('new_label') or '') or w['season']))
 
 def apply(p,st,w,t):
     h=w['candidate']
@@ -274,7 +328,7 @@ def apply(p,st,w,t):
                     source_data=json.dumps(info,ensure_ascii=False)
             except (TypeError,ValueError):
                 source_data=''
-            p.ts(place,'set',hash=h,title=w.get('new_label') or st['sources'][w['id']]['label'],
+            p.ts(place,'set',hash=h,title=w.get('new_label') or w['source'].get('label') or t['label'],
                  poster=raw.get('poster') or '',category=raw.get('category') or '',data=source_data)
         p.ts_files(place,h,save=True)
     for _ in range(4):
@@ -310,7 +364,8 @@ def catalog(p,st):
                 if place+':'+h in st['replaced']: continue
                 data=dict(data)
                 watches=[w for w in st['watches'].values() if w['place']==place and w['hash']==h]
-                data['seasons']=sorted([dict(n=w['season'],id=w['id'],ready=w['ready'],waiting=w['waiting'],tmdb=w.get('tmdb')) for w in watches if w['season']],key=lambda x:x['n'])
+                data['identities']=next((w['identities'] for w in watches if w.get('identities')),[])
+                data['seasons']=sorted([dict(stale=w.get('stale',False) or place in errors,asof=w.get('asof'),n=w['season'],id=w['id'],ready=w['ready'],waiting=w['waiting'],tmdb=w.get('tmdb')) for w in watches if w['season']],key=lambda x:x['n'])
                 cards.append(data)
     grouped=grouped_receipts(st)
     pending={k:r for k,r in st.get('deletions',{}).items() if k not in grouped}
@@ -419,6 +474,7 @@ def verify_deletion(p,st,place,h):
                 st['sources'].pop(wid,None)
         st['sources'].pop(item_id(place,h,0),None)
         unlink_version(st,place,h)
+    prune(st)
     save(st)
     return dict(pending=False,confirmed=True,message='Раздача удалена · '+NAMES[place])
 
@@ -479,7 +535,7 @@ def grouped_receipts(st):
     return {key.split(':')[0]+':'+member['hash'] for key,job in st.get('removal_groups',{}).items()
             for member in job['members']}
 
-def stage_group(st,place,head,inventory,actor,keep=None):
+def stage_group(st,place,head,inventory,actor,keep=None,required=None,hint=None):
     versions=earlier_versions(st,place,head)
     if not keep: versions.append(head)
     by_hash={t['hash']:t for t in inventory}
@@ -487,7 +543,7 @@ def stage_group(st,place,head,inventory,actor,keep=None):
     if place=='box' and (not actor or any(type(m['id']) is not int for m in members)):
         raise Unavailable('Не удалось проверить ID версий в аккаунте TorBox')
     key=place+':'+head
-    st.setdefault('removal_groups',{})[key]=dict(members=members,actor=actor,keep=keep,
+    st.setdefault('removal_groups',{})[key]=dict(members=members,actor=actor,keep=keep,required=required,hint=hint,
         head_id=by_hash.get(head,{}).get('raw',{}).get('id'),
         keep_id=by_hash.get(keep,{}).get('raw',{}).get('id'),due=int(time.time()))
     save(st)
@@ -506,8 +562,18 @@ def advance_group(p,st,key):
         h=member['hash']
         try:
             live=p.inventory(place)
-            if job['keep'] and not any(t['hash']==job['keep'] and
-                    (place!='box' or (t['raw'].get('id')==job['keep_id'] and t['raw'].get('download_present'))) for t in live):
+            keep=next((row for row in live if row['hash']==job['keep'] and
+                       (place!='box' or (row['raw'].get('id')==job['keep_id'] and row['raw'].get('download_present')))),None)
+            complete=True
+            if job['keep'] and keep:
+                if job.get('required') is None:
+                    hashes={m['hash'] for m in job['members']}
+                    required=required_episodes(p,place,[row for row in live if row['hash'] in hashes],0)
+                else:
+                    required=set(map(tuple,job['required']))
+                files=media_files(p,place,keep)
+                complete=bool(files) and required.issubset(episode_numbers(files,job.get('hint') or season_hint(keep['label'])))
+            if job['keep'] and (not keep or not complete):
                 # Bring the last surviving predecessor of each branch back into the catalog.
                 available={t['hash'] for t in live}
                 for old in earlier_versions(st,place,head):
@@ -545,6 +611,7 @@ def advance_group(p,st,key):
         unlink_version(st,place,h)
         save(st)
     del st['removal_groups'][key]
+    prune(st)
     save(st)
     return dict(pending=False,confirmed=True,message=('Предыдущие версии удалены' if job['keep'] else 'Все версии раздачи удалены')+' · '+NAMES[place])
 
@@ -584,11 +651,25 @@ def check_removal(p,st,place,h):
     key=place+':'+h
     return advance_group(p,st,key) if key in st.get('removal_groups',{}) else verify_deletion(p,st,place,h)
 
-def update_release(p,st,place,h,season,selection='',preview=False,actor=None):
+def update_release(p,st,place,h,season,selection='',confirmation='',actor=None):
     key=place+':'+h
+    if not confirmation:
+        st=deepcopy(st)
     prior=st.get('removal_groups',{}).get(key)
     if prior:
-        if prior['keep'] and not preview: return retry_group(p,st,key)
+        if prior['keep']:
+            if not prior.get('failed'): return dict(message='Предыдущие версии ожидают подтверждения удаления')
+            live=p.inventory(place)
+            members={m['hash']:m['id'] for m in prior['members']}
+            versions=[dict(hash=r['hash'],label=r['label'],id=r['raw'].get('id')) for r in live
+                      if r['hash'] in members and (place!='box' or r['raw'].get('id')==members[r['hash']])]
+            active=existing(p,place,h)
+            offer=dict(place=place,original=h,candidate=h,label=active['label'],season=season,ready=[],
+                       versions=sorted(versions,key=lambda r:r['hash']),retry=prior['failed'])
+            signature=digest(json.dumps(offer,sort_keys=True))
+            if not confirmation: return dict(offer=offer,confirmation=signature)
+            if confirmation!=signature: raise Unavailable('Список версий изменился')
+            return retry_group(p,st,key)
         raise Unavailable('Выполняется удаление версий')
     if key in grouped_receipts(st): raise Unavailable('Эта версия удаляется')
     if place+':'+h in st.get('deletions',{}): raise Unavailable('Проверяется удаление этой раздачи')
@@ -619,34 +700,77 @@ def update_release(p,st,place,h,season,selection='',preview=False,actor=None):
         raise Unavailable('Пока не удалось распознать номера серий')
     else:
         movie_offer(p,st,t,w,selection)
-    if not preview: save(st)
     if w['choices']: return dict(choices=w['choices'])
     if not w.get('candidate'):
         return dict(message=w['detail'] or ('Новых серий пока нет' if known else 'Раздача актуальна'))
-    if preview: return dict(candidate=w['candidate'],ready=w['ready'])
-    if place=='box' and not actor: raise Unavailable('Требуется действующий аккаунт Lampac')
+    if place=='box' and confirmation and not actor: raise Unavailable('Требуется действующий аккаунт Lampac')
     target_key=place+':'+w['candidate']
     if target_key in st['replaced'] or target_key in st.get('deletions',{}) or target_key in st.get('removal_groups',{}) or target_key in grouped_receipts(st):
         raise Unavailable('Для выбранной версии уже выполнялась замена или удаление')
     previous=p.inventory(place)
     if not any(row['hash']==h and (place!='box' or row['raw'].get('id')==t['raw'].get('id')) for row in previous):
         raise Unavailable('Исходная раздача изменилась. Обновите каталог')
+    newh=w['candidate']
+    predecessors=set(earlier_versions(st,place,h)+earlier_versions(st,place,newh)+[h])
+    retiring=sorted((row for row in previous if row['hash'] in predecessors),key=lambda row:row['hash'])
+    required=required_episodes(p,place,retiring,season)
+    if season:
+        for old in retiring:
+            for n,episodes in st['files'].get(old['hash'],{}).items():
+                required.update((int(n),int(ep)) for ep in episodes)
+    required.update((season,n) for n in w['ready'])
+    w['required']=sorted(required)
+    if required:
+        available=episode_numbers(p.candidate_files(place,newh),season_hint(w['new_label']) or season)
+        missing=sorted(required-available)
+        if missing:
+            labels=', '.join(f'S{s:02}E{e:02}' for s,e in missing[:8])
+            raise Unavailable('В новой раздаче отсутствуют серии: '+labels)
+    retiring_cards=[dict(hash=row['hash'],label=row['label'],id=row['raw'].get('id')) for row in retiring]
+    offer=dict(place=place,original=h,candidate=newh,label=w['new_label'],season=season,ready=w['ready'],
+               versions=retiring_cards,required=w['required'],source=w['source']['page'],
+               candidate_id=next((row['raw'].get('id') for row in previous if row['hash']==newh),None))
+    signature=digest(json.dumps(offer,sort_keys=True,ensure_ascii=False))
+    if not confirmation:
+        return dict(offer=offer,confirmation=signature)
+    if confirmation!=signature:
+        raise Unavailable('Вариант обновления изменился. Откройте предпросмотр ещё раз')
     new=apply(p,st,w,t)
     newh=new['hash']
+    if place=='box' and offer['candidate_id'] is not None and new['raw'].get('id')!=offer['candidate_id']:
+        raise Unavailable('Карточка TorBox изменилась. Предыдущие версии сохранены')
     st['replaced'][place+':'+h]=newh
     if w.get('tmdb'):st['identities'][newh]=w['tmdb']
     for oldrow in list(st['watches'].values()):
         if oldrow['place']==place and oldrow['hash']==h:
             bound=st['sources'].get(oldrow['id'])
             if bound: st['sources'][item_id(place,newh,oldrow['season'])]=bound
+            st['sources'].pop(oldrow['id'],None)
             del st['watches'][oldrow['id']]
+    st['sources'].pop(item_id(place,h,season),None)
     st['sources'][item_id(place,newh,season)]=w['source']
     # Publish the verified replacement and the cleanup intent in one state write.
-    key=stage_group(st,place,newh,previous+[new],actor,keep=newh)
+    key=stage_group(st,place,newh,previous+[new],actor,keep=newh,required=w['required'],hint=season_hint(w['new_label']) or season)
     cleanup=advance_group(p,st,key)
     if cleanup.get('missing'): return cleanup
     message='Раздача обновлена. '+('Ожидается удаление предыдущих версий' if cleanup.get('pending') else cleanup['message'])
     return dict(message=message,hash=newh,ready=w['ready'],pending=cleanup.get('pending',False))
+
+def choose_identity(p,st,place,h,value):
+    row=existing(p,place,h)
+    if place+':'+h in st['replaced'] or row['movie']: raise Unavailable('Карточка изменилась')
+    _,choices=identity(p,row,st)
+    if str(value) not in {c['value'] for c in choices}: raise Unavailable('Список TMDB изменился')
+    st['identities'][h]=int(value)
+    for w in st['watches'].values():
+        if w['hash']==h and w.get('identities'):
+            w.update(tmdb=int(value),identities=[],stale=True,ready=[],waiting=[],choices=[])
+    rows=item_rows(p,st,row,place,force=True)
+    for w in rows:
+        if not w.get('stale'): w['asof']=int(time.time())
+        st['watches'][w['id']]=w
+    save(st)
+    return dict(message='Сериал TMDB выбран',hash=h)
 
 def main():
     os.umask(0o077)
@@ -669,12 +793,15 @@ def main():
                 result=remove_release(p,st,args[1],args[2],int(args[3]) if args[3] else None,os.environ['SEASON_WATCH_ACTOR'])
             elif len(args)==3 and args[0]=='verify-remove':
                 result=check_removal(p,st,args[1],args[2])
-            elif len(args)==5 and args[0]=='update':
-                result=update_release(p,st,args[1],args[2],int(args[3]),args[4],actor=os.environ.get('SEASON_WATCH_ACTOR'))
+            elif len(args)==4 and args[0]=='identity':
+                result=choose_identity(p,st,args[1],args[2],args[3])
+            elif len(args)==6 and args[0]=='update':
+                result=update_release(p,st,args[1],args[2],int(args[3]),args[4],confirmation=args[5],actor=os.environ.get('SEASON_WATCH_ACTOR'))
             else: raise Unavailable('Некорректная команда')
     print(json.dumps(result,ensure_ascii=False,separators=(',',':')))
 if __name__=='__main__':
     try: main()
     except ERRORS as exc:
+        print(f'SeasonWatch {sys.argv[1] if len(sys.argv)>1 else "worker"}: {type(exc).__name__}',file=sys.stderr)
         print(optional_label(exc))
         sys.exit(1)

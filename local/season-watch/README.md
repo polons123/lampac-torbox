@@ -13,3 +13,11 @@ The worker runs as `lampac` with system Python 3 and the libtorrent Python bindi
 Register the host's `/season-watch.js` URL under `LampaWeb.customPlugins`. The module is loaded dynamically by Lampac. The timer runs at 00:43, 06:43, 12:43 and 18:43 UTC.
 
 Run `python3 -B test_worker.py` from this directory for the isolated worker tests. The browser fixture uses Chromium, Node.js with WebSocket support and the host's installed Lampa web assets.
+
+## Updating a release
+
+Opening **Обновить** previews the candidate, tracker label, new episodes and the versions to be removed in that library. **Подтвердить замену** rechecks the selection and the old versions. A different candidate or deletion list requires a fresh preview. A replacement must retain every recognized episode number from all affected seasons and contain the new episodes on the destination. Re-encoded files and different audio tracks can be accepted. Previous versions are removed from the provider after verification. Restoring the plugin code cannot restore removed torrents.
+
+Ambiguous series have a **Выбрать сериал в TMDB** action. During a provider outage, the last successful season data is marked with its observation time. The scheduled scan reconciles outstanding removals even after the client closes.
+
+The worker reads the local Lampac HTTP port from `listen.port` in `/opt/lampac/init.conf`. Set the optional integer `lampac_port` in `/etc/season-watch/config.json` to override it. TorBox deletion requests go to loopback.

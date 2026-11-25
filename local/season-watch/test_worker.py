@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 import worker as w
-from providers import Unavailable, episode_files
+from providers import Providers, Unavailable, episode_files
 
 A='a'*40
 B='b'*40
@@ -60,6 +60,10 @@ class Tests(unittest.TestCase):
             ctx=patch.object(w,name,val);ctx.start();self.addCleanup(ctx.stop)
         self.addCleanup(self.tmp.cleanup)
         self.p=Sources();self.s=w.state()
+    def update(self,*args,**kwargs):
+        preview=w.update_release(self.p,self.s,*args,**kwargs)
+        if 'offer' not in preview: return preview
+        return w.update_release(self.p,self.s,*args,**kwargs,confirmation=preview['confirmation'])
     def scan(self):
         w.scan(self.p,self.s);w.save(self.s)
     def get(self,place='peer'):
@@ -88,38 +92,40 @@ class Tests(unittest.TestCase):
         self.assertNotIn('episode',result['files'][0])
     def test_card_update_and_archive(self):
         self.scan();self.p.rows=[jac(B)]
-        self.p.candidate=[dict(name='New.S02E03.mkv',size=96),file(1,9999)]
+        self.p.candidate=[dict(name='New.S02E03.mkv',size=96),file(1,9999),file(2,8999)]
         self.p.rows[0].update(audio=[],voices=['Other'])
-        result=w.update_release(self.p,self.s,'peer',A,0)
+        result=self.update('peer',A,0)
         self.assertEqual(result['ready'],[3]);self.assertEqual(self.p.writes,[('peer',B)])
         self.assertEqual([t['hash'] for t in self.p.inventory('peer')],[B]);self.assertEqual(self.p.removals,[('peer',A)])
         self.assertEqual([c['hash'] for c in w.catalog(self.p,self.s)['cards'] if c['place']=='peer'],[B])
-        with self.assertRaises(Unavailable):w.update_release(self.p,self.s,'peer',A,0)
+        with self.assertRaises(Unavailable):self.update('peer',A,0)
         self.assertEqual(len(self.p.writes),1)
     def test_no_new_episode(self):
         self.scan();self.p.rows=[jac(B)];self.p.candidate=[file(2,777)]
-        self.assertIn('Новых',w.update_release(self.p,self.s,'peer',A,0)['message'])
+        self.assertIn('Новых',self.update('peer',A,0)['message'])
         self.assertFalse(self.p.writes)
     def test_box_cache_and_outage(self):
         self.scan();self.p.rows=[jac(B)]
-        w.update_release(self.p,self.s,'box',A,0,actor='viewer');self.assertEqual(self.p.writes,[('box',B)])
+        self.update('box',A,0,actor='viewer');self.assertEqual(self.p.writes,[('box',B)])
         self.p.box_down=True
         catalog=w.catalog(self.p,self.s);self.assertIn('box',catalog['errors'])
         self.assertTrue(any(c['place']=='peer' for c in catalog['cards']))
     def test_ambiguous_then_selected(self):
         self.p.rows=[jac(B),{**jac(C),'page':'2'*64}]
-        res=w.update_release(self.p,self.s,'peer',A,0)
+        res=self.update('peer',A,0)
         self.assertEqual(len(res['choices']),2);self.assertFalse(self.p.writes)
-        with self.assertRaises(Unavailable):w.update_release(self.p,self.s,'peer',A,0,'f'*64)
-        w.update_release(self.p,self.s,'peer',A,0,res['choices'][0]['value'])
+        with self.assertRaises(Unavailable):self.update('peer',A,0,'f'*64)
+        self.update('peer',A,0,res['choices'][0]['value'])
         self.assertEqual(self.p.writes,[('peer',B)])
     def test_movie_and_different_sources(self):
         self.p.items['home'][0].update(movie=True,tv=False,files=[{'id':1,'name':'movie.mkv','size':60}])
         self.scan()
         cards=w.catalog(self.p,self.s)['cards'];self.assertEqual(len(cards),3)
         self.assertTrue(next(c for c in cards if c['place']=='home')['movie'])
-        self.assertIn('актуальна',w.update_release(self.p,self.s,'home',A,0)['message'])
-        self.p.rows=[jac(B)];w.update_release(self.p,self.s,'home',A,0)
+        self.assertIn('актуальна',self.update('home',A,0)['message'])
+        self.p.rows=[jac(B)]
+        choices=self.update('home',A,0)['choices']
+        self.update('home',A,0,choices[0]['value'])
         self.assertEqual(self.p.writes,[('home',B)])
     def test_torrserver_remove_scoped(self):
         for place in ('home','peer'):
@@ -166,7 +172,7 @@ class Tests(unittest.TestCase):
         self.assertEqual([t['hash'] for t in self.p.inventory('home')],[A])
     def test_update_failure_keeps_original(self):
         self.scan();self.p.rows=[jac(B)];self.p.ts_files=lambda *args,**kwargs:[file(2)]
-        with self.assertRaises(Unavailable): w.update_release(self.p,self.s,'peer',A,0)
+        with self.assertRaises(Unavailable): self.update('peer',A,0)
         self.assertFalse(self.p.removals)
         self.assertEqual([t['hash'] for t in self.p.inventory('peer')],[A])
     def test_deferred_update_cleanup_survives_reload(self):
@@ -177,7 +183,7 @@ class Tests(unittest.TestCase):
             return dict(success=True,ticket='abc',scope='fixture',check_after=1060000)
         self.p.box_deletion=native
         with patch('worker.time.time',return_value=1000):
-            r=w.update_release(self.p,self.s,'box',A,0,actor='viewer')
+            r=self.update('box',A,0,actor='viewer')
             self.assertTrue(r['pending']);self.assertEqual(r['hash'],B)
         with patch('worker.time.time',return_value=1061):
             self.s=w.state()
@@ -210,6 +216,94 @@ class Tests(unittest.TestCase):
         self.assertIn(self.get_id('home'),self.s['watches'])
     def test_destination_must_have_new_episode(self):
         self.scan();self.p.rows=[jac(B)];self.p.ts_files=lambda *args,**kwargs:[file(1)]
-        with self.assertRaises(Unavailable):w.update_release(self.p,self.s,'peer',A,0)
+        with self.assertRaises(Unavailable):self.update('peer',A,0)
         self.assertFalse(self.p.writes)
+    def test_partial_season_or_pack_preserves_original(self):
+        for items in self.p.items.values():
+            items[0]['files'].append(dict(name='Show.S01E01.mkv',size=100))
+        self.scan(); self.p.rows=[jac(B)]
+        for candidate in ([file(1),file(2),file(3)],[file(3)]):
+            self.p.candidate=candidate
+            with self.assertRaisesRegex(Unavailable,'S01E01'):
+                self.update('peer',A,2)
+            self.assertFalse(self.p.removals)
+            self.assertFalse(self.p.writes)
+        self.p.candidate=[*self.p.items['peer'][0]['files'],file(3)]
+        self.assertEqual(self.update('peer',A,2)['hash'],B)
+
+    def test_preview_pins_candidate_and_removal_set(self):
+        self.scan();self.p.rows=[jac(B)]
+        def request(token=''):
+            return w.update_release(self.p,self.s,'peer',A,2,confirmation=token)
+        preview=request()
+        self.assertEqual(preview['offer']['versions'][0]['hash'],A)
+        self.assertEqual(preview['offer']['ready'],[3])
+        self.assertFalse(self.p.removals or self.p.writes)
+        self.p.rows=[jac(C)]
+        with self.assertRaisesRegex(Unavailable,'изменился'): request(preview['confirmation'])
+        self.p.rows=[jac(B)]
+        self.s['replaced']['peer:'+C]=A
+        self.p.items['peer'].append(torrent(C,[file(1)]))
+        with self.assertRaisesRegex(Unavailable,'изменился'): request(preview['confirmation'])
+        self.assertFalse(self.p.removals or self.p.writes)
+
+    def test_incomplete_destination_after_valid_preview(self):
+        self.scan();self.p.rows=[jac(B)]
+        self.p.ts_files=lambda *a,**kw:[file(3)]
+        with self.assertRaises(Unavailable): self.update('peer',A,2)
+        self.assertFalse(self.p.removals)
+
+    def test_identity_choice_from_current_results_only(self):
+        self.p.items['peer'][0]['tmdb']=None
+        calendar=self.p.calendar
+        self.p.calendar=lambda path,**kw: ({'results':[{'id':31,'name':'Show A'},{'id':32,'name':'Show B'}]}
+                                           if path=='search/tv' else calendar(path,**kw))
+        self.scan()
+        c=next(c for c in w.catalog(self.p,self.s)['cards'] if c['place']=='peer')
+        self.assertEqual(len(c['identities']),2)
+        with self.assertRaises(Unavailable):w.choose_identity(self.p,self.s,'peer',A,33)
+        w.choose_identity(self.p,self.s,'peer',A,32)
+        self.assertEqual(w.state()['identities'][A],32)
+        self.assertEqual(self.get()['tmdb'],32)
+
+    def test_provider_schema_cannot_confirm_removal(self):
+        p=Providers.__new__(Providers)
+        p.memo={};p.cfg={'jacred':dict(base_url='https://jac.invalid',api_key='fixture')}
+        for invalid in ({},None,'',{'unexpected':[]},[None],[{}]):
+            p.ts=lambda *args:invalid
+            self.s['deletions']={'peer:'+A:dict(id=None,due=0,until=0)}
+            with self.assertRaises(Unavailable): w.verify_deletion(p,self.s,'peer',A)
+            self.assertIn('peer:'+A,self.s['deletions'])
+        with patch('providers.http',return_value=[]):
+            with self.assertRaises(Unavailable): p.jac('Show','Show')
+
+    def test_tmdb_and_torbox_reject_malformed_responses(self):
+        p=Providers.__new__(Providers);p.memo={};p.cfg={'tmdb':'fixture'}
+        with patch('providers.http',return_value={'episodes':{}}):
+            with self.assertRaises(Unavailable): p.calendar('tv/1/season/1')
+        with patch.object(p,'json_file',return_value={'api_key':'fixture'}),patch('providers.http',return_value=[]):
+            with self.assertRaises(Unavailable): p.box('mylist')
+
+    def test_retired_versions_are_in_coverage(self):
+        self.scan();self.p.rows=[jac(B)]
+        self.s['replaced']['peer:'+C]=A
+        self.p.items['peer'].append(torrent(C,[dict(name='Show.S01E07.mkv',size=100)]))
+        with self.assertRaisesRegex(Unavailable,'S01E07'): self.update('peer',A,2)
+        self.assertFalse(self.p.removals or self.p.writes)
+
+    def test_stale_data_and_shared_hash_pruning(self):
+        self.p.rows=[jac(B)]
+        self.scan();self.p.box_down=True; self.scan()
+        self.assertEqual(self.get('box')['ready'],[3])
+        self.assertTrue(self.get('box')['stale'])
+        self.assertGreater(self.get('box')['asof'],0)
+        self.s['identities'][A]=19
+        self.p.items['peer']=[];self.p.items['home']=[]
+        self.scan()
+        self.assertIn(A,self.s['files'])
+        self.p.box_down=False;self.scan()
+        self.assertIn(A,self.s['identities'])
+        self.p.items['box']=[];self.scan()
+        self.assertNotIn(A,self.s['files']);self.assertNotIn(A,self.s['identities'])
+        self.assertFalse(self.s['sources'])
 if __name__=='__main__':unittest.main()

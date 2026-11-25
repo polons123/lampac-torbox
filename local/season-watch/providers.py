@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import uuid
+import sys
 from pathlib import Path
 from urllib import parse, request
 from urllib.error import HTTPError
@@ -42,6 +43,31 @@ def http(url, headers=None, body=None, timeout=18):
     except (OSError, ValueError):
         raise Unavailable('Ошибка соединения или формата ответа') from None
 
+def checked(value, kind, operation):
+    if not isinstance(value, kind):
+        print(f'{operation}: unexpected {type(value).__name__}', file=sys.stderr)
+        raise Unavailable('Некорректные данные источника · '+operation)
+    return value
+
+def records(value, operation):
+    rows=checked(value,list,operation)
+    for row in rows: checked(row,dict,operation)
+    return rows
+
+def file_list(value, operation):
+    rows=records(value,operation)
+    for row in rows:
+        checked(row.get('path') or row.get('name'),str,operation)
+        size=row.get('length') or row.get('size') or 0
+        if not isinstance(size,(int,str)) or not str(size).isdecimal():
+            raise Unavailable('Некорректный размер файла · '+operation)
+    return rows
+
+def valid_hash(value, operation):
+    if not isinstance(value,str) or not HASH.fullmatch(value.lower()):
+        raise Unavailable('Некорректный хеш · '+operation)
+    return value.lower()
+
 def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -78,20 +104,27 @@ def unpack_ts(item):
         data = json.loads(item.get('data') or '{}')
     except (ValueError, TypeError):
         data = {}
-    m = data.get('movie') or {}
+    m = checked(checked(data,dict,'TorrServer metadata').get('movie') or {},dict,'TorrServer movie')
     tv = bool(m.get('first_air_date') or m.get('number_of_seasons') or m.get('media_type') == 'tv')
     movie = not tv and bool(m.get('release_date') or m.get('media_type') == 'movie')
-    title = m.get('name') or m.get('title') or ''
-    return {'hash': item['hash'].lower(), 'label': item.get('title') or title, 'tv': tv,
-            'movie': movie, 'tmdb': m.get('id'), 'title': title, 'poster':m.get('poster_path') or item.get('poster') or '',
+    title = checked(m.get('name') or m.get('title') or '',str,'TorrServer movie title')
+    return {'hash': valid_hash(item.get('hash'),'TorrServer list'), 'label': checked(item.get('title') or title,str,'TorrServer title'), 'tv': tv,
+            'movie': movie, 'tmdb': m.get('id'), 'title': title, 'poster':checked(m.get('poster_path') or item.get('poster') or '',str,'TorrServer poster'),
             'year':str(m.get('first_air_date') or m.get('release_date') or '')[:4],
             'original': m.get('original_name') or m.get('original_title') or title,
-            'files': item.get('file_stats') or [], 'raw': item}
+            'files': file_list(item['file_stats'] if item.get('file_stats') is not None else [],'TorrServer files'), 'raw': item}
 
 class Providers:
     def __init__(self):
         self.cfg = json.loads(SETTINGS.read_text())
         self.memo = {}
+
+    def json_file(self,path):
+        stamp=path.stat().st_mtime_ns
+        cached=self.memo.get(path)
+        if not cached or cached[0]!=stamp:
+            self.memo[path]=(stamp,checked(json.loads(path.read_text()),dict,path.name))
+        return self.memo[path][1]
 
     def ts(self, place, action, **fields):
         c = self.cfg['ts'][place]
@@ -107,12 +140,12 @@ class Providers:
             params['save']=''
         data = http(c['url'] + '/stream?' + parse.urlencode(params),
                     {'Authorization': c['auth']}, timeout=24)
-        if data.get('hash', '').lower() != h or not data.get('file_stats'):
+        if valid_hash(checked(data,dict,'TorrServer stat').get('hash'),'TorrServer stat') != h or not data.get('file_stats'):
             raise Unavailable('Список файлов пока недоступен')
-        return data['file_stats']
+        return file_list(data['file_stats'],'TorrServer stat')
 
     def box(self, path, params=None, form=None):
-        cfg = json.loads((APP / 'torbox-private.json').read_text())
+        cfg = self.json_file(APP / 'torbox-private.json')
         if cfg.get('allow_client_credentials') or not cfg.get('api_key'):
             raise Unavailable('Серверный аккаунт TorBox не настроен')
         url = 'https://api.torbox.app/v1/api/torrents/' + path
@@ -126,14 +159,18 @@ class Providers:
             body=''.join('--'+boundary+'\r\nContent-Disposition: form-data; name="'+name+'"\r\n\r\n'+val+'\r\n'
                          for name,val in form.items()).encode()+('--'+boundary+'--\r\n').encode()
         result = http(url, headers, body)
-        if result.get('success') is not True:
+        if checked(result,dict,'TorBox '+path).get('success') is not True:
             raise Unavailable('TorBox отклонил запрос')
         return result.get('data')
 
     def box_deletion(self, actor, body, check=False):
         # Reuse the Lampac module's account guard, item deletion and metadata cleanup.
         route='delete/check' if check else 'delete'
-        url='http://127.0.0.1:19092/torbox/'+route+'?'+parse.urlencode({'account_email':actor})
+        port=self.cfg.get('lampac_port')
+        if port is None:
+            port=self.json_file(APP/'init.conf')['listen']['port']
+        if not 1 <= int(port) <= 65535: raise Unavailable('Некорректный порт Lampac')
+        url=f'http://127.0.0.1:{int(port)}/torbox/'+route+'?'+parse.urlencode({'account_email':actor})
         result=http(url,{'X-TorBox-Mode':'file'},body,timeout=45)
         if not isinstance(result,dict) or not result.get('success'):
             raise Unavailable('TorBox не подтвердил запрос')
@@ -141,21 +178,24 @@ class Providers:
 
     def inventory(self, place):
         if place != 'box':
-            return [unpack_ts(t) for t in self.ts(place, 'list')]
-        mappings = json.loads((APP / 'database/torbox-library.json').read_text()) if (APP / 'database/torbox-library.json').exists() else {}
+            return [unpack_ts(t) for t in records(self.ts(place, 'list'),'TorrServer list')]
+        mappings = self.json_file(APP / 'database/torbox-library.json') if (APP / 'database/torbox-library.json').exists() else {}
         items = []
         offset = 0
         while True:
             batch = self.box('mylist', dict(limit=100, offset=offset, files='true', bypass_cache='true'))
             if not isinstance(batch, list):
                 raise Unavailable('Некорректный список TorBox')
-            for t in batch:
-                h = (t.get('hash') or '').lower()
+            for t in records(batch,'TorBox mylist'):
+                h = valid_hash(t.get('hash'),'TorBox mylist')
+                if (type(t.get('id')) is not int or t['id']<0 or type(t.get('name')) is not str
+                        or ('download_present' in t and type(t['download_present']) is not bool)):
+                    raise Unavailable('Некорректная запись TorBox')
                 metas = [entries['hash:'+h] for entries in mappings.values() if 'hash:'+h in entries]
                 m = metas[0] if metas and len({(v.get('tmdb_id'),v.get('media_type')) for v in metas}) == 1 else {}
                 items.append(dict(hash=h, label=t['name'], title=m.get('title') or '', original=m.get('original_title') or '',
                                   tmdb=m.get('tmdb_id'), tv=m.get('media_type')=='tv', movie=m.get('media_type')=='movie',
-                                  files=t.get('files') or [], raw=t, poster=m.get('poster_path') or '', year=str(m.get('year') or '')))
+                                  files=file_list(t['files'] if t.get('files') is not None else [],'TorBox files'), raw=t, poster=m.get('poster_path') or '', year=str(m.get('year') or '')))
             if len(batch) < 100:
                 return items
             offset += len(batch)
@@ -165,7 +205,10 @@ class Providers:
         if key not in self.memo:
             self.memo[key] = http('https://api.themoviedb.org/3/'+path+'?'+parse.urlencode(
                 dict(api_key=self.cfg['tmdb'], language='ru-RU', **params)))
-        return self.memo[key]
+        result=checked(self.memo[key],dict,'TMDB')
+        if path=='search/tv': records(result.get('results'),'TMDB search')
+        if '/season/' in path: records(result.get('episodes'),'TMDB episodes')
+        return result
 
     def jac(self, title, original, movie=False, year=0):
         key = ('jac',title,original,movie,year)
@@ -174,10 +217,9 @@ class Providers:
         c = self.cfg['jacred']
         data = http(c['base_url'].rstrip('/') + '/api/v2.0/indexers/all/results?' + parse.urlencode(
             dict(title=title,title_original=original or title,year=year,is_serial=1 if movie else 2,apikey=c['api_key'])))
-        if not isinstance(data.get('Results'), list):
-            raise Unavailable('Некорректный ответ JacRed')
+        rows=records(checked(data,dict,'JacRed search').get('Results'),'JacRed results')
         out = []
-        for row in data['Results']:
+        for row in rows:
             m = re.search(r'btih:([\da-f]{40})(?![\da-f])', parse.unquote(row.get('MagnetUri') or ''), re.I)
             u = parse.urlsplit(row.get('Details') or '')
             if not m or u.scheme not in ('https','http') or not u.hostname:
@@ -201,8 +243,12 @@ class Providers:
             if ('meta',h) not in self.memo:
                 self.memo['meta',h]=files(h,self.memo.get(('trackers',h),[]))
             return self.memo['meta',h]
-        cache = self.box('checkcached', {'hash':h, 'format':'object','list_files':'true'})
-        row = cache.get(h) if isinstance(cache,dict) else None
+        key=('box-files',h)
+        if key in self.memo: return self.memo[key]
+        cache = checked(self.box('checkcached', {'hash':h, 'format':'object','list_files':'true'}),dict,'TorBox checkcached')
+        row = cache.get(h)
+        if row is not None: checked(row,dict,'TorBox cached torrent')
         if not row or not row.get('files'):
             raise Unavailable('Ожидает кеша TorBox')
-        return row['files']
+        self.memo[key]=file_list(row['files'],'TorBox checkcached')
+        return self.memo[key]

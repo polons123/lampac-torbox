@@ -56,10 +56,10 @@
         function current() { var a=Lampa.Activity.active();return valid() && a && a.component==='all_releases'; }
         function back() { if (current()) Lampa.Controller.toggle('content'); }
         function error(s) { if(current()) {message(s);back();} }
-        function edit(c,season,choice) {
+        function edit(c,season,choice,confirmation) {
             if (!current()) return;
             message('Проверяю раздачу');
-            request('season-watch/update',{place:c.place,hash:c.hash,season:season||0,choice:choice||''},function (r) {
+            request('season-watch/update',{place:c.place,hash:c.hash,season:season||0,choice:choice||'',confirmation:confirmation||''},function (r) {
                 if (!current()) return;
                 if (r.seasons) return select('Выберите сезон',r.seasons.map(function (s) {
                     return {title:'Сезон '+s,run:function () {edit(c,s,'');}};
@@ -67,6 +67,17 @@
                 if (r.choices) return select('Выберите раздачу для обновления',r.choices.map(function (item) {
                     return {title:safe(item.label),run:function () {edit(c,season,item.value);}};
                 }),back);
+                if (r.offer) {
+                    var offer=r.offer;
+                    var episodes=offer.ready.map(function (n) {return number(offer.season,n);}).join(', ');
+                    var versions=offer.versions.map(function (v) {return safe(v.label)+' ['+safe(v.hash.slice(0,8))+']';}).join('<br>');
+                    return select('Подтвердить обновление · '+names[c.place],[
+                        {title:'Отмена',run:function () {actions(c);}},
+                        {title:offer.retry?'Повторить очистку':'Подтвердить замену',
+                         subtitle:safe(offer.label)+(episodes?'<br>'+episodes:'')+'<br>Будут удалены:<br>'+versions,
+                         run:function () {edit(c,offer.season,choice,r.confirmation);}}
+                    ],function () {actions(c);});
+                }
                 message(r.message);
                 if (r.hash) {
                     refreshBadge(); Lampa.Activity.replace({component:'all_releases',title:title,page:1});
@@ -157,20 +168,22 @@
         function reload() {
             if (current()) Lampa.Activity.replace({component:'all_releases',title:title,page:1});
         }
-        function followRemoval(c,due) {
+        function followRemoval(c,due,attempt) {
             var k=c.place+':'+c.hash;
+            attempt=attempt||0;
             removing[k]=true;
             clearTimeout(timers[k]);
+            if (attempt>=12) {if (current()) message('Проверка удаления продолжится в фоне');return;}
             timers[k]=setTimeout(function () {
                 if (!valid()) return;
                 request('season-watch/remove/check',{place:c.place,hash:c.hash},function (r) {
                     if (!valid()) return;
-                    if (r.pending) return followRemoval(c,r.due);
+                    if (r.pending) return followRemoval(c,r.due,attempt+1);
                     delete removing[k];
                     refreshBadge();
                     if (current()) {message(r.message);reload();}
                 },function () {
-                    if (current()) followRemoval(c,Date.now()/1000+30);
+                    if (current()) followRemoval(c,Date.now()/1000+30,attempt+1);
                 });
             }, Math.max(1000,(due||0)*1000-Date.now()));
         }
@@ -202,6 +215,15 @@
             var rows=[{title:'Смотреть',subtitle:safe(c.label),run:function () {play(c);}},
                 {title:'Сохранить в Infuse',subtitle:names[c.place],run:function () {infuse(c);}},
                 {title:'Обновить',subtitle:names[c.place]+' · после успешного обновления прежние версии будут удалены',run:function () {edit(c,0,'');}}];
+            if (c.identities && c.identities.length) rows.push({title:'Выбрать сериал в TMDB',run:function () {
+                select('Выберите сериал в TMDB',c.identities.map(function (candidate) {
+                    return {title:safe(candidate.label),run:function () {
+                        request('season-watch/identity',{place:c.place,hash:c.hash,identity:Number(candidate.value)},function (result) {
+                            if (current()) {message(result.message);refreshBadge();reload();}
+                        },error);
+                    }};
+                }),function () {actions(c);});
+            }});
             if(c.place==='box') rows.push({title:'Управление TorBox',run:function () {
                 Lampa.Activity.push({component:'my_torbox',title:'Мой TorBox',page:1});
             }});
@@ -230,6 +252,7 @@
                 var q=/(?:2160|1080|720|480)[pр]|4K/i.exec(c.label);
                 var info=[names[c.place],q && q[0]].filter(Boolean);
                 (c.seasons||[]).forEach(function (s) {
+                    if (s.stale) info.push('Последние данные'+(s.asof?' от '+new Date(s.asof*1000).toLocaleString():''));
                     if (s.ready.length) info.push('Доступна '+s.ready.map(function (n) {return number(s.n,n);}).join(', '));
                     else if(s.waiting.length) info.push('Вышла '+s.waiting.map(function (n) {return number(s.n,n);}).join(', '));
                 });

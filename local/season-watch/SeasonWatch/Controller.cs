@@ -4,6 +4,7 @@ using Newtonsoft.Json.Linq;
 using Shared;
 using System;
 using System.Diagnostics;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -16,13 +17,31 @@ public class SeasonWatchController : BaseController
     const string report = "/var/lib/season-watch/report.json";
     static readonly SemaphoreSlim gate = new(4,4);
 
+    static readonly object accountsLock = new();
+    static DateTime accountsModified;
+    static HashSet<string> accounts;
     bool Allowed() {
         var uid = requestInfo?.user_uid;
         if (string.IsNullOrEmpty(uid) || requestInfo.IsAnonymousRequest) return false;
         var user = CoreInit.conf.accsdb.findUser(uid);
         if (user == null || user.ban || user.expires <= DateTime.Now) return false;
-        return JArray.Parse(System.IO.File.ReadAllText("/etc/season-watch/accounts.json"))
-            .Values<string>().Contains(uid,StringComparer.OrdinalIgnoreCase);
+        const string path = "/etc/season-watch/accounts.json";
+        lock (accountsLock) {
+            try {
+                var modified = System.IO.File.GetLastWriteTimeUtc(path);
+                if (accounts == null || modified != accountsModified) {
+                    var entries = JArray.Parse(System.IO.File.ReadAllText(path));
+                    if (entries.Any(x => x.Type != JTokenType.String)) throw new FormatException();
+                    accounts = new HashSet<string>(entries.Values<string>(), StringComparer.OrdinalIgnoreCase);
+                    accountsModified = modified;
+                }
+                return accounts.Contains(uid);
+            } catch (Exception e) when (e is IOException || e is UnauthorizedAccessException ||
+                                        e is Newtonsoft.Json.JsonException || e is FormatException) {
+                accounts = null;
+                throw new IOException("SeasonWatch account list unavailable", e);
+            }
+        }
     }
     ActionResult Error(int code,string message) => new JsonResult(new { detail=message }) {StatusCode=code};
 
@@ -44,6 +63,8 @@ public class SeasonWatchController : BaseController
         public string hash {get;set;}
         public int season {get;set;}
         public string choice {get;set;}
+        public string confirmation {get;set;}
+        public int identity {get;set;}
     }
     static bool Valid(string place,string hash) =>
         (place=="home" || place=="peer" || place=="box") && Regex.IsMatch(hash??"", @"\A[a-f0-9]{40}\z");
@@ -58,9 +79,16 @@ public class SeasonWatchController : BaseController
     [HttpPost, Route("season-watch/update"), RequestSizeLimit(1024)]
     public Task<ActionResult> Update([FromBody] Input input) {
         if (Request.Headers["X-Season-Watch"]!="1" || input==null || !Valid(input.place,input.hash) ||
+            (!string.IsNullOrEmpty(input.confirmation) && !Regex.IsMatch(input.confirmation,@"\A[a-f0-9]{64}\z")) ||
             input.season<0 || input.season>999 || !string.IsNullOrEmpty(input.choice) && !Regex.IsMatch(input.choice,@"\A[a-f0-9]{64}\z"))
             return Task.FromResult(Error(400,"Некорректный выбор"));
-        return Run("update",input.place,input.hash,input.season.ToString(),input.choice??"");
+        return Run("update",input.place,input.hash,input.season.ToString(),input.choice??"",input.confirmation??"");
+    }
+    [HttpPost, Route("season-watch/identity"), RequestSizeLimit(1024)]
+    public Task<ActionResult> Identity([FromBody] Input input) {
+        if (Request.Headers["X-Season-Watch"]!="1" || input==null || !Valid(input.place,input.hash) || input.identity<1)
+            return Task.FromResult(Error(400,"Некорректный выбор TMDB"));
+        return Run("identity",input.place,input.hash,input.identity.ToString());
     }
     public class Removal {
         public string place {get;set;}
@@ -84,7 +112,8 @@ public class SeasonWatchController : BaseController
     }
     async Task<ActionResult> Run(params string[] args) {
         Response.Headers["Cache-Control"]="private, no-store";
-        if (!Allowed()) return Error(403,"Нет доступа к библиотекам");
+        try { if (!Allowed()) return Error(403,"Нет доступа к библиотекам"); }
+        catch (IOException) { return Error(503,"Список доступа временно недоступен"); }
         if (!await gate.WaitAsync(TimeSpan.FromSeconds(2))) return Error(429,"Источник занят. Повторите запрос");
         try {
             var info=new ProcessStartInfo("/usr/bin/python3") { UseShellExecute=false,RedirectStandardOutput=true };
