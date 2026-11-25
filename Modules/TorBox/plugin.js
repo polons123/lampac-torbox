@@ -863,16 +863,19 @@
     for (var k = 0; k < candidates.length; k++) if (/^https?:\/\//i.test(candidates[k] || '')) return candidates[k];
     return '';
   }
-  function addToTorBox(torrent, hash) {
+  function addToTorBox(torrent, hash, refresh) {
     if (busy) return Lampa.Noty.show('Запрос TorBox уже выполняется');
     busy = true;
     request('add', { link: torrentLink(torrent), hash: hash, film: currentFilm(torrent), allow_download: true }, function (j) {
       busy = false;
       Lampa.Noty.show(j.existing ? 'Раздача уже есть в вашем TorBox' : 'Раздача добавлена в TorBox');
+      refresh();
     }, function () { busy = false; });
   }
   function addToTorrServer(torrent, movie, hash) {
     if (!Lampa.Torserver || !Lampa.Torserver.url()) return Lampa.Noty.show('Укажите адрес TorrServer в настройках Lampa');
+    if (busy) return Lampa.Noty.show('Добавление уже выполняется');
+    busy = true;
     var title = movie && (movie.title || movie.name);
     var original = movie && (movie.original_title || movie.original_name);
     Lampa.Torserver.add({
@@ -880,8 +883,8 @@
       title: title ? [title, original].filter(Boolean).join(' / ') : torrent.Title || torrent.title || hash,
       poster: movie && movie.img || torrent.poster,
       data: movie ? { lampa: true, movie: movie } : null
-    }, function () { Lampa.Noty.show('Раздача добавлена в TorrServer'); },
-    function () { Lampa.Noty.show('Не удалось добавить раздачу в TorrServer'); });
+    }, function () { busy = false; Lampa.Noty.show('Раздача добавлена в TorrServer'); },
+    function () { busy = false; Lampa.Noty.show('Не удалось добавить раздачу в TorrServer'); });
   }
   function watch(t, film, allowDownload, cacheMissing) {
     if (busy) return Lampa.Noty.show('Запрос TorBox уже выполняется');
@@ -1282,6 +1285,20 @@
         if (cached !== true) return server();
         var controller = Lampa.Controller.enabled().name;
         function back() { Lampa.Select.hide(); Lampa.Controller.toggle(controller); }
+        function refreshCache() {
+          if (!live(session)) return;
+          delete session.states[hash];
+          request('cache-check', { hashes: [hash] }, function (result) {
+            if (!live(session)) return;
+            var item = (result.items || []).find(function (entry) { return entry.hash === hash; });
+            if (item && typeof item.cached === 'boolean') {
+              session.states[hash] = { cached: item.cached, until: Date.now() + 30000 };
+            }
+            if (session.root) {
+              if (session.only) redraw(session, true); else updateBadges(session);
+            }
+          }, function () { if (live(session) && session.root) updateBadges(session); }, true);
+        }
         function missing() {
           choose('Раздача больше не доступна в кэше TorBox', [
             { title: 'Воспроизвести через TorrServer', run: server },
@@ -1291,7 +1308,7 @@
         choose('Где воспроизвести раздачу?', [
           { title: 'Воспроизвести из кэша TorBox', run: function () { watch(torrent, currentFilm(torrent), false, missing); } },
           { title: 'Воспроизвести через TorrServer', run: server },
-          { title: 'Добавить в TorBox', run: function () { back(); addToTorBox(torrent, hash); } },
+          { title: 'Добавить в TorBox', run: function () { back(); addToTorBox(torrent, hash, refreshCache); } },
           { title: 'Добавить в TorrServer', run: function () { back(); addToTorrServer(torrent, movie, hash); } }
         ], back);
       }

@@ -10,7 +10,7 @@ assert(start >= 0 && end > start);
 const choose = source.slice(source.indexOf('  function choose('), source.indexOf('  function state('));
 const add = source.slice(source.indexOf('  function torrentLink('), source.indexOf('  function watch('));
 
-let payload, Component, active, menu, torrserverURL = 'https://torrserver.example', failAdd = false;
+let payload, Component, active, menu, torrserverURL = 'https://torrserver.example', failAdd = false, failBox = false, afterSave;
 const requests = [], saved = [], notifications = [], playback = [];
 const Lampa = {
   Component: {
@@ -23,7 +23,7 @@ const Lampa = {
   Select: { show: selection => { menu = selection; }, hide: () => { menu = null; } },
   Noty: { show: message => notifications.push(message) },
   Torrent: { start: () => playback.push('TorrServer') },
-  Torserver: { url: () => torrserverURL, add: (data, done, fail) => { saved.push(data); (failAdd ? fail : done)(); } },
+  Torserver: { url: () => torrserverURL, add: (data, done, fail) => { saved.push(data); if (afterSave) afterSave = done; else (failAdd ? fail : done)(); } },
   Listener: { follow() {} },
   Utils: { hash: (value) => value },
   Storage: { get: () => true }
@@ -31,7 +31,12 @@ const Lampa = {
 vm.runInNewContext('var busy = false;\n' + choose + add + source.slice(start, end) + 'installTorrentCache();', {
   Lampa, $: { extend: Object.assign }, keyIdentity: () => 'fixture', setTimeout() {}, clearTimeout() {},
   currentFilm: () => ({ title: 'Example' }), watch: () => playback.push('TorBox'),
-  request: (route, body, done) => { requests.push({ route, body }); done({ existing: false }); }
+  request: (route, body, done, fail) => {
+    requests.push({ route, body });
+    if (route==='cache-check') return done({items:[{hash:body.hashes[0],cached:true}]});
+    if (failBox) return fail('test failure');
+    done({ existing: false });
+  }
 });
 
 const hash = ch => ch.repeat(40);
@@ -84,7 +89,7 @@ function select(title) {
   assert.equal(menu, null);
 }
 select('Добавить в TorBox');
-assert.equal(requests.length, 1);
+assert.deepEqual(requests.map(r=>r.route), ['add','cache-check']);
 assert.equal(requests[0].route, 'add');
 assert.equal(requests[0].body.allow_download, true);
 assert.equal(requests[0].body.hash, hash('a'));
@@ -102,6 +107,18 @@ torrserverURL = '';
 select('Добавить в TorrServer');
 assert.equal(saved.length, 2);
 assert.equal(playback.length, 0);
+failBox = true;
+select('Добавить в TorBox');
+assert.equal(requests.at(-1).route,'add');
+failBox = false;
+select('Добавить в TorBox');
+assert.equal(requests.at(-1).route,'cache-check');
+torrserverURL='https://torrserver.example';
+afterSave=true;
+select('Добавить в TorrServer');
+select('Добавить в TorrServer');
+assert.equal(saved.length,3);
+afterSave();
 select('Воспроизвести из кэша TorBox');
 select('Воспроизвести через TorrServer');
 session.states[hash('a')].cached = false;
