@@ -219,6 +219,18 @@ public class ApiController : BaseController
                 bulder = handler.Invoke("appjs", new EventAppReplace(bulder, null, type, host, requestInfo, HttpContext.Request));
         }
 
+        // Set the Android client's default before Lampa initializes its settings and input fields.
+        bulder.Insert(0, """
+            if (typeof AndroidJS !== 'undefined') {
+                try {
+                    if (localStorage.getItem('keyboard_type') === null) {
+                        localStorage.setItem('keyboard_type', 'integrate');
+                    }
+                } catch (error) {}
+            }
+
+            """);
+
         return ContentTo(bulder, "application/javascript; charset=utf-8");
     }
     #endregion
