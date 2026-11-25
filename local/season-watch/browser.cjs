@@ -8,6 +8,7 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
 (async function () {
     const dir='/opt/lampac/wwwroot/lampa-main';
     let actions = 0, previews = 0, identities = 0;
+    const selections=[];
     const deletions=[],gone=new Set();
     let checks=0;
     let infuseMedia=false, incomplete=false;
@@ -56,7 +57,7 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
             let raw='';q.on('data',c=>raw+=c);q.on('end',()=>{
                 const body=JSON.parse(raw);r.setHeader('Content-Type','application/json');
                 if(route.endsWith('/identity')){
-                    assert.equal(body.identity,22);identities++;return r.end(JSON.stringify({hash:body.hash,message:'TMDB'}));
+                    selections.push(body);identities++;return r.end(JSON.stringify({hash:body.hash,message:'TMDB'}));
                 }
                 if(!body.confirmation){
                     previews++;return r.end(JSON.stringify({offer:{label:'New 1080p',season:2,ready:[3],versions:[{hash:body.hash,label:'Old 1080p'}]},confirmation:'c'.repeat(64)}));
@@ -122,6 +123,16 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
         await choose('Выбрать сериал в TMDB');await choose('Show (2024)');
         for(let i=0;i<30&&!identities;i++)await delay(100);
         assert.equal(identities,1);await delay(300);
+        assert.equal(selections[0].identity,22);
+        await ev(fs.readFileSync(path.join(__dirname,'../../Modules/TorBox/plugin.js'),'utf8').replaceAll('{localhost}',origin));
+        await ev("window.oldEdit=Lampa.Input.edit;window.oldGet=Lampa.Api.sources.tmdb.get;Lampa.Input.edit=(o,done)=>done('Fixture');Lampa.Api.sources.tmdb.get=(path,params,done)=>done({results:path==='search/movie'?[{id:43,title:'Fixture',original_title:'Fixture',release_date:'2024-01-01',poster_path:'/cover.jpg'}]:[]});");
+        await openCard('Домашний');await choose('Уточнить фильм или сериал');
+        await until("testMenus.at(-1).items.some(x=>x.title==='Fixture (2024)')");
+        await choose('Fixture (2024)');
+        for(let i=0;i<30&&selections.length<2;i++)await delay(100);
+        assert.deepEqual(selections[1],{place:'home',hash:'1'.repeat(40),identity:43,media_type:'movie'});
+        await ev("Lampa.Input.edit=oldEdit;Lampa.Api.sources.tmdb.get=oldGet");
+        await delay(300);
         await openCard('h2nexus-p');await choose('Обновить');
         await until("testMenus.at(-1).items.some(x=>x.title==='Подтвердить замену')");
         await choose('Подтвердить замену');assert.equal(previews,2);

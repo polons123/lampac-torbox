@@ -9,6 +9,7 @@ assert(start > 0 && end > start);
 const requests = [], saves = [];
 let actions, entered, active = true, done = false;
 const context = {
+  window: {},
   Lampa: {
     Input: { edit: (input, send) => { entered = input; entered.send = send; } },
     Noty: { show() {} },
@@ -20,6 +21,7 @@ const context = {
   setTimeout: () => 1, clearTimeout() {}
 };
 vm.runInNewContext(file.slice(start, end), context);
+assert.equal(context.window.lampac_choose_film, context.clarifyFilm);
 const torrent = { id: 23, name: 'Фортитьюд  Fortitude [S01-03] (2015-2018) WEB-DL 720p от ExKinoRay | Русский репортаж' };
 assert.equal(context.posterName(torrent.name).type, 'tv');
 context.clarifyFilm(torrent, () => { done = true; }, () => {}, () => active);

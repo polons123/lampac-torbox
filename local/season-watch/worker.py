@@ -207,7 +207,7 @@ def scan(p,st):
     for place in NAMES:
         now=int(time.time())
         try:
-            inventory=p.inventory(place)
+            inventory=[enriched(p,st,t,place) for t in p.inventory(place)]
             cards=[card(t,place) for t in inventory]
         except ERRORS as err:
             print(f'{place} inventory: {type(err).__name__}',file=sys.stderr)
@@ -315,11 +315,115 @@ def apply(p,st,w,t):
         time.sleep(2)
     raise Unavailable('Источник ещё не подтвердил сохранение. Старая версия доступна')
 
+def poster_url(value):
+    if re.fullmatch(r'/[\w.-]{1,160}\.(?:jpe?g|png|webp)',value or '',re.I): return value
+    try:
+        u=urlsplit(value or '')
+        if u.scheme not in ('http','https') or not u.hostname or u.username or u.password: return ''
+        if u.hostname=='image.tmdb.org' and re.fullmatch(r'/t/p/(?:w\d+|original)/[\w.-]+',u.path):
+            return '/'+u.path.rsplit('/',1)[1]
+        return value
+    except ValueError:
+        return ''
+
+def tmdb_fields(record,kind):
+    title=record.get('name' if kind=='tv' else 'title')
+    if type(record.get('id')) is not int or not title: raise Unavailable('Некорректная карточка TMDB')
+    return dict(tmdb=record['id'],title=title,original=record.get('original_name' if kind=='tv' else 'original_title') or title,
+                year=(record.get('first_air_date' if kind=='tv' else 'release_date') or '')[:4],
+                tv=kind=='tv',movie=kind=='movie',poster=poster_url(record.get('poster_path')))
+
+def release_name(label):
+    text=re.sub(r'^(?:\s*\[[^\]]+\]\s*)+', '',label)
+    year=re.search(r'(?<!\d)((?:19|20)\d{2})(?!\d)',text)
+    title=re.split(r'[\[(]|\s*/\s*|(?<!\w)(?:19|20)\d{2}\b|\bS\d{1,2}(?:E\d+)?\b|\b(?:season|сезон|1080p|2160p|720p|web[- .]?dl|bdrip)\b',text,flags=re.I)[0]
+    return re.sub(r'\s+',' ',title.replace('.',' ').replace('_',' ')).strip(' -'),year[1] if year else ''
+
+def enriched(p,st,t,place,lookup=True):
+    # A source's current association wins. A previous catalog also covers external hash changes.
+    t=dict(t,poster=poster_url(t.get('poster')))
+    if t['poster'] and t.get('tmdb'): return t
+    name,year=release_name(t['label'])
+    saved=st.get('catalog',{}).get(place,[])
+    matching=[c for c in saved if c['hash']==t['hash']]
+    previous=matching[0] if matching else {}
+    known=t.get('tmdb') or previous.get('tmdb') or (not t['movie'] and st['identities'].get(t['hash']))
+    kind='tv' if t['tv'] else 'movie' if t['movie'] else ''
+    if not kind and known: kind='movie' if previous.get('movie') else 'tv'
+    if not matching and name:
+        # Without a year, only reuse the same release label (a repack can change the hash).
+        matching=[c for c in saved if (year and release_name(c['label'])==(name,year)) or c['label']==t['label']]
+    matching=[c for c in matching if c.get('poster') and (not known or c.get('tmdb')==known)
+              and (not kind or c.get(kind))]
+    if matching and len({(c.get('tmdb'),c.get('tv'),c['poster']) for c in matching})==1:
+        c=matching[0]
+        for key in ('title','original','year','poster','tmdb','tv','movie'):
+            if not t.get(key) and c.get(key): t[key]=c[key]
+        return t
+    if t['poster'] or not lookup: return t
+    try:
+        if known:
+            data=p.calendar(f'{kind}/{int(known)}')
+            fields=tmdb_fields(data,kind)
+            if fields['tmdb']!=int(known): return t
+        else:
+            if not name: return t
+            if not kind and (season_hint(t['label']) or episode_files(t['files'])): kind='tv'
+            results=p.calendar('search/'+(kind or 'multi'),query=name)['results']
+            matches=[]
+            for r in results:
+                typ=kind or r.get('media_type')
+                if typ not in ('movie','tv'): continue
+                f=tmdb_fields(r,typ)
+                if normalize(name) in {normalize(f['title']),normalize(f['original'])} and (not year or f['year']==year):
+                    matches.append(f)
+            if len(matches)!=1: return t
+            fields=matches[0]
+        t.update(fields)
+    except ERRORS as exc:
+        print(f'{place} poster: {type(exc).__name__}',file=sys.stderr)
+    return t
+
+def film_input(t):
+    return dict(tmdb_id=int(t['tmdb']),title=t['title'],original_title=t.get('original') or t['title'],
+                year=int(t['year']) if str(t.get('year','')).isdigit() else 0,poster_path=t.get('poster') or '',
+                media_type='tv' if t['tv'] else 'movie')
+
+def remember_card(st,t,place):
+    rows=st.setdefault('catalog',{}).setdefault(place,[])
+    rows[:]=[c for c in rows if c['hash']!=t['hash']]
+    rows.append(card(t,place))
+
+def set_film(p,st,place,h,kind,value,actor):
+    t=existing(p,place,h)
+    if place+':'+h in st['replaced'] or kind not in ('movie','tv'): raise Unavailable('Карточка изменилась')
+    fields=tmdb_fields(p.calendar(f'{kind}/{int(value)}'),kind)
+    if fields['tmdb']!=int(value): raise Unavailable('Карточка TMDB изменилась')
+    p.write_film(place,t,film_input(fields),actor,True)
+    t.update(fields)
+    remember_card(st,t,place)
+    for key,row in list(st['watches'].items()):
+        if row['place']==place and row['hash']==h:
+            st['watches'].pop(key)
+            st['sources'].pop(key,None)
+    st['sources'].pop(item_id(place,h,0),None)
+    for season in st['files'].get(h,{}): st['sources'].pop(item_id(place,h,season),None)
+    save(st)
+    if kind=='tv':
+        try:
+            rows=item_rows(p,st,t,place)
+        except ERRORS as exc:
+            print(f'{place} calendar after film selection: {type(exc).__name__}',file=sys.stderr)
+            rows=[]
+        for row in rows:
+            row['asof']=int(time.time())
+            st['watches'][row['id']]=row
+        save(st)
+    return dict(message='Карточка сохранена' if fields['poster'] else 'Карточка сохранена. У TMDB пока нет постера',hash=h)
+
 def card(t,place):
-    poster=t.get('poster') or ''
-    image=re.search(r'/([a-zA-Z0-9_-]+\.(?:jpg|png|webp))$',urlsplit(poster).path)
     return dict(place=place,hash=t['hash'],title=t['title'] or display_name(t),label=t['label'][:400],
-        poster='/'+image.group(1) if image else '',year=t.get('year',''),movie=t['movie'],
+        poster=poster_url(t.get('poster')),year=t.get('year',''),movie=t['movie'],tv=t['tv'],tmdb=t.get('tmdb'),original=t.get('original'),
         box_id=t['raw'].get('id') if place=='box' else None)
 
 def catalog(p,st):
@@ -329,7 +433,7 @@ def catalog(p,st):
         jobs={place:pool.submit(p.inventory,place) for place in NAMES}
         for place,job in jobs.items():
             try:
-                items=[card(t,place) for t in job.result()]
+                items=[card(enriched(p,st,t,place),place) for t in job.result()]
             except ERRORS as exc:
                 errors[place]=optional_label(exc)
                 items=st.get('catalog',{}).get(place,[])
@@ -439,7 +543,7 @@ def verify_deletion(p,st,place,h):
     if still_present:
         save(st)
         return dict(pending=False,confirmed=False,message='Источник пока показывает раздачу. Удаление не подтверждено')
-    st.setdefault('catalog',{})[place]=[card(t,place) for t in inventory]
+    st.setdefault('catalog',{})[place]=[card(enriched(p,st,t,place,lookup=False),place) for t in inventory]
     st['totals'][place]=len(inventory)
     if not same:
         for wid,w in list(st['watches'].items()):
@@ -639,7 +743,7 @@ def update_release(p,st,place,h,season,selection='',confirmation='',actor=None):
         raise Unavailable('Выполняется удаление версий')
     if key in grouped_receipts(st): raise Unavailable('Эта версия удаляется')
     if place+':'+h in st.get('deletions',{}): raise Unavailable('Проверяется удаление этой раздачи')
-    t=existing(p,place,h)
+    t=enriched(p,st,existing(p,place,h),place)
     if place+':'+h in st['replaced']:
         return dict(message='Эта раздача уже обновлена')
     known={} if t['movie'] else (st['files'].get(h) or {})
@@ -692,6 +796,17 @@ def update_release(p,st,place,h,season,selection='',confirmation='',actor=None):
     newh=new['hash']
     if place=='box' and offer['candidate_id'] is not None and new['raw'].get('id')!=offer['candidate_id']:
         raise Unavailable('Карточка TorBox изменилась. Предыдущие версии сохранены')
+    if t.get('poster'):
+        # Preserve artwork before staging the deletion of any previous version.
+        saved=dict(new)
+        if t.get('tmdb') and (t['tv'] or t['movie']):
+            if (new.get('tmdb'),new['tv'],poster_url(new.get('poster'))) != (t['tmdb'],t['tv'],t['poster']):
+                p.write_film(place,new,film_input(t),actor,False)
+            for field in ('poster','tmdb','tv','movie','title','original','year'):
+                saved[field]=t.get(field)
+        elif not saved.get('poster'):
+            saved['poster']=t['poster']
+        remember_card(st,saved,place)
     st['replaced'][place+':'+h]=newh
     if w.get('tmdb'):st['identities'][newh]=w['tmdb']
     for oldrow in list(st['watches'].values()):
@@ -746,6 +861,8 @@ def main():
                 result=remove_release(p,st,args[1],args[2],int(args[3]) if args[3] else None,os.environ['SEASON_WATCH_ACTOR'])
             elif len(args)==3 and args[0]=='verify-remove':
                 result=check_removal(p,st,args[1],args[2])
+            elif len(args)==5 and args[0]=='film':
+                result=set_film(p,st,*args[1:],os.environ['SEASON_WATCH_ACTOR'])
             elif len(args)==4 and args[0]=='identity':
                 result=choose_identity(p,st,args[1],args[2],args[3])
             elif len(args)==6 and args[0]=='update':

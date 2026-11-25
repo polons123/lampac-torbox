@@ -64,6 +64,7 @@ public class SeasonWatchController : BaseController
         public int season {get;set;}
         public string choice {get;set;}
         public string confirmation {get;set;}
+        public string media_type {get;set;}
         public int identity {get;set;}
     }
     static bool Valid(string place,string hash) =>
@@ -88,7 +89,9 @@ public class SeasonWatchController : BaseController
     public Task<ActionResult> Identity([FromBody] Input input) {
         if (Request.Headers["X-Season-Watch"]!="1" || input==null || !Valid(input.place,input.hash) || input.identity<1)
             return Task.FromResult(Error(400,"Некорректный выбор TMDB"));
-        return Run("identity",input.place,input.hash,input.identity.ToString());
+        if (input.media_type==null) return Run("identity",input.place,input.hash,input.identity.ToString());
+        if (input.media_type!="tv" && input.media_type!="movie") return Task.FromResult(Error(400,"Некорректный тип TMDB"));
+        return Run("film",input.place,input.hash,input.media_type,input.identity.ToString());
     }
     public class Removal {
         public string place {get;set;}
@@ -117,7 +120,7 @@ public class SeasonWatchController : BaseController
         if (!await gate.WaitAsync(TimeSpan.FromSeconds(2))) return Error(429,"Источник занят. Повторите запрос");
         try {
             var info=new ProcessStartInfo("/usr/bin/python3") { UseShellExecute=false,RedirectStandardOutput=true };
-            if (args[0]=="remove" || args[0]=="update") info.Environment["SEASON_WATCH_ACTOR"]=requestInfo.user_uid;
+            if (args[0]=="remove" || args[0]=="update" || args[0]=="film") info.Environment["SEASON_WATCH_ACTOR"]=requestInfo.user_uid;
             info.ArgumentList.Add("/usr/local/lib/season-watch/worker.py");
             foreach (var arg in args) info.ArgumentList.Add(arg);
             using var process=Process.Start(info);

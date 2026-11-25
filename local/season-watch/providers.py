@@ -166,6 +166,9 @@ class Providers:
     def box_deletion(self, actor, body, check=False):
         # Reuse the Lampac module's account guard, item deletion and metadata cleanup.
         route='delete/check' if check else 'delete'
+        return self.box_local(actor,route,body)
+
+    def box_local(self,actor,route,body):
         port=self.cfg.get('lampac_port')
         if port is None:
             port=self.json_file(APP/'init.conf')['listen']['port']
@@ -175,6 +178,33 @@ class Providers:
         if not isinstance(result,dict) or not result.get('success'):
             raise Unavailable('TorBox не подтвердил запрос')
         return result
+
+    def write_film(self,place,item,film,actor,manual):
+        if place=='box':
+            saved=self.box_local(actor,'metadata',dict(id=item['raw']['id'],film=film,automatic=not manual))['film']
+            if saved.get('tmdb_id')!=film['tmdb_id'] or saved.get('media_type')!=film['media_type'] or (film['poster_path'] and not saved.get('poster_path')):
+                raise Unavailable('Метаданные TorBox изменились. Уточните карточку')
+            return
+        raw=item['raw']
+        data=json.loads(raw.get('data') or '{}')
+        movie=data.get('movie') or {}
+        tv=film['media_type']=='tv'
+        if movie.get('id')!=film['tmdb_id'] or item['tv']!=tv: movie={}
+        date='first_air_date' if tv else 'release_date'
+        year=str(film['year']) if film['year'] else ''
+        if not year or not str(movie.get(date) or '').startswith(year):
+            movie[date]=year+'-01-01' if year else ''
+        movie.update(id=film['tmdb_id'],media_type=film['media_type'],poster_path=film['poster_path'])
+        movie['name' if tv else 'title']=film['title']
+        movie['original_name' if tv else 'original_title']=film['original_title']
+        data['movie']=movie
+        poster=film['poster_path']
+        if poster.startswith('/'): poster='https://image.tmdb.org/t/p/w500'+poster
+        self.ts(place,'add',link='magnet:?xt=urn:btih:'+item['hash'],title=raw.get('title') or item['label'],
+                category=raw.get('category') or '',poster=poster,data=json.dumps(data,ensure_ascii=False),save_to_db=True)
+        current=next((t for t in self.inventory(place) if t['hash']==item['hash']),{})
+        if current.get('tmdb')!=film['tmdb_id'] or current.get('poster')!=film['poster_path'] or current.get('tv')!=tv:
+            raise Unavailable('TorrServer не подтвердил сохранение карточки')
 
     def inventory(self, place):
         if place != 'box':
@@ -206,7 +236,7 @@ class Providers:
             self.memo[key] = http('https://api.themoviedb.org/3/'+path+'?'+parse.urlencode(
                 dict(api_key=self.cfg['tmdb'], language='ru-RU', **params)))
         result=checked(self.memo[key],dict,'TMDB')
-        if path=='search/tv': records(result.get('results'),'TMDB search')
+        if path.startswith('search/'): records(result.get('results'),'TMDB search')
         if '/season/' in path: records(result.get('episodes'),'TMDB episodes')
         return result
 

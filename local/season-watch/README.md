@@ -18,6 +18,8 @@ Run `python3 -B test_worker.py` from this directory for the isolated worker test
 
 Opening **Обновить** previews the candidate, tracker label, new episodes and the versions to be removed in that library. **Подтвердить замену** rechecks the selection and the old versions. A different candidate or deletion list requires a fresh preview. For a series, the destination must contain the newly offered episodes of the selected season. A new release can omit earlier episodes or entire seasons. Previous versions are removed from the provider after verification. Restoring the plugin code cannot restore removed torrents.
 
+Every card has **Уточнить фильм или сериал**. Select the title, year and type in the shared TMDB picker to save the association and its poster to that TorrServer or to the Lampac TorBox library. The release label and files are preserved. The catalog also uses known TMDB IDs or a unique matching title for external additions. Updates carry available artwork to the new version before cleanup.
+
 Ambiguous series have a **Выбрать сериал в TMDB** action. During a provider outage, the last successful season data is marked with its observation time. The scheduled scan reconciles outstanding removals even after the client closes.
 
 The worker reads the local Lampac HTTP port from `listen.port` in `/opt/lampac/init.conf`. Set the optional integer `lampac_port` in `/etc/season-watch/config.json` to override it. TorBox deletion requests go to loopback.

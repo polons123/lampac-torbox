@@ -29,7 +29,7 @@ class Sources:
         if place=='box' and self.box_down:raise Unavailable('HTTP 503')
         return self.items[place]
     def calendar(self,path,**kw):
-        if '/season/' not in path:return {'name':'Show','original_name':'Show'}
+        if '/season/' not in path:return {'id':19,'name':'Show','original_name':'Show'}
         return {'episodes':[dict(episode_number=i,air_date='2020-01-01') for i in range(1,4)]}
     def jac(self,*args,**kwargs): return self.rows
     def candidate_files(self,place,h):return self.candidate
@@ -265,6 +265,58 @@ class Tests(unittest.TestCase):
         w.choose_identity(self.p,self.s,'peer',A,32)
         self.assertEqual(w.state()['identities'][A],32)
         self.assertEqual(self.get()['tmdb'],32)
+
+    def test_catalog_posters_for_external_add_and_replacement(self):
+        record=dict(id=72,title='Arrival',original_title='Arrival',release_date='2016-01-01',
+                    media_type='movie',poster_path='/arrival.jpg')
+        t=dict(torrent(A,[]),tmdb=None,tv=False,title='',label='Arrival.2016.1080p')
+        self.p.calendar=lambda *args,**kw:{'results':[record]}
+        first=w.enriched(self.p,self.s,t,'home')
+        self.assertEqual((first['tmdb'],first['poster']),(72,'/arrival.jpg'))
+        w.remember_card(self.s,first,'home')
+        self.p.calendar=lambda *args,**kw: self.fail('poster already cached')
+        other=w.enriched(self.p,self.s,dict(t,hash=B,label='Arrival.2016.2160p'),'home')
+        self.assertEqual(other['poster'],'/arrival.jpg')
+        self.p.calendar=lambda *args,**kw:{'results':[record,dict(record,id=84)]}
+        self.assertFalse(w.enriched(self.p,self.s,t,'peer')['poster'])
+        self.assertEqual(w.poster_url('https://covers.example/art?id=4'),'https://covers.example/art?id=4')
+        self.assertFalse(w.poster_url('javascript:fake'))
+
+    def test_manual_choice_updates_title_type_and_poster(self):
+        self.scan()
+        self.p.calendar=lambda *a,**k:dict(id=55,title='Correct film',original_title='Original',
+                                           poster_path='/right.jpg',release_date='2019-02-03')
+        writes=[]
+        self.p.write_film=lambda place,row,film,actor,manual:writes.append((place,film,manual))
+        w.set_film(self.p,self.s,'peer',A,'movie',55,'actor')
+        self.assertEqual(writes[0][1]['poster_path'],'/right.jpg')
+        self.assertTrue(writes[0][2])
+        self.assertEqual(self.s['catalog']['peer'][0]['title'],'Correct film')
+        self.assertNotIn(w.item_id('peer',A,2),self.s['watches'])
+        self.assertIn(w.item_id('home',A,2),self.s['watches'])
+
+    def test_update_writes_poster_before_cleanup_in_all_libraries(self):
+        for place in w.NAMES:
+            with self.subTest(place=place):
+                self.p=Sources()
+                self.s['replaced']={}
+                self.p.items[place][0]['poster']='/original.jpg'
+                self.p.rows=[jac(B)]
+                recorded=[]
+                def write(site,row,film,actor,manual):
+                    self.assertFalse(self.p.removals)
+                    recorded.append((site,row['hash'],film['poster_path']))
+                self.p.write_film=write
+                self.update(place,A,2,actor='actor')
+                self.assertEqual(recorded,[(place,B,'/original.jpg')])
+                self.assertEqual(next(c for c in self.s['catalog'][place] if c['hash']==B)['poster'],'/original.jpg')
+        self.p=Sources()
+        self.s=w.state();self.s['replaced']={}
+        self.p.rows=[jac(B)];self.p.items['box'][0]['poster']='/original.jpg'
+        def fail(*args): raise Unavailable('metadata unavailable')
+        self.p.write_film=fail
+        with self.assertRaises(Unavailable): self.update('box',A,2,actor='actor')
+        self.assertFalse(self.p.removals)
 
     def test_provider_schema_cannot_confirm_removal(self):
         p=Providers.__new__(Providers)

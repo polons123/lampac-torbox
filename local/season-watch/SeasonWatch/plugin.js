@@ -206,6 +206,23 @@
                 }}
             ],function () {if (current()) actions(c);});
         }
+        function saveFilm(c,type,id) {
+            request('season-watch/identity',{place:c.place,hash:c.hash,identity:id,media_type:type},function (r) {
+                if (current()) {message(r.message);refreshBadge();reload();}
+            },error);
+        }
+        function clarify(c) {
+            function choose() {
+                if (!current()) return;
+                if (!window.lampac_choose_film) return error('Обновите плагины Lampa и повторите поиск');
+                window.lampac_choose_film({name:c.label,film:{title:c.title,media_type:c.tv?'tv':c.movie?'movie':''}},
+                    reload,function () {if (current()) actions(c);},current,function (film) {
+                        saveFilm(c,film.media_type,film.tmdb_id);
+                    });
+            }
+            if (window.lampac_choose_film) choose();
+            else Lampa.Utils.putScriptAsync([url('torbox.js')],choose,function () {if (current()) error('Поиск TMDB недоступен');});
+        }
         function actions(c) {
             ++infuseVisit;
             var read=Lampa.Storage.get(seenKey(),{})||{};
@@ -215,12 +232,11 @@
             var rows=[{title:'Смотреть',subtitle:safe(c.label),run:function () {play(c);}},
                 {title:'Сохранить в Infuse',subtitle:names[c.place],run:function () {infuse(c);}},
                 {title:'Обновить',subtitle:names[c.place]+' · после успешного обновления прежние версии будут удалены',run:function () {edit(c,0,'');}}];
+            rows.push({title:'Уточнить фильм или сериал',run:function () {clarify(c);}});
             if (c.identities && c.identities.length) rows.push({title:'Выбрать сериал в TMDB',run:function () {
                 select('Выберите сериал в TMDB',c.identities.map(function (candidate) {
                     return {title:safe(candidate.label),run:function () {
-                        request('season-watch/identity',{place:c.place,hash:c.hash,identity:Number(candidate.value)},function (result) {
-                            if (current()) {message(result.message);refreshBadge();reload();}
-                        },error);
+                        saveFilm(c,'tv',Number(candidate.value));
                     }};
                 }),function () {actions(c);});
             }});
@@ -238,7 +254,7 @@
                 var cards=d.cards||[];
                 function score(c) {return c.seasons.some(function (s){return s.ready.length;})?0:c.seasons.some(function (s){return s.waiting.length;})?1:2;}
                 cards.sort(function (a,b) {return score(a)-score(b)||a.title.localeCompare(b.title)||a.place.localeCompare(b.place)||a.label.localeCompare(b.label);});
-                var results=cards.map(function (c) {return {id:c.place+'-'+c.hash,title:safe(c.title),original_title:safe(c.title),poster_path:c.poster,release_date:c.year?c.year+'-01-01':'',item:c};});
+                var results=cards.map(function (c) {return {id:c.place+'-'+c.hash,title:safe(c.title),original_title:safe(c.title),poster_path:/^https?:/.test(c.poster)?'':c.poster,img:/^https?:/.test(c.poster)?c.poster:undefined,release_date:c.year?c.year+'-01-01':'',item:c};});
                 if (!results.length) results.push({id:'empty',title:'Раздач пока нет'});
                 self.build({results:results,total_pages:1});
                 Object.keys(d.errors||{}).forEach(function (k) {message(names[k]+': '+d.errors[k]);});

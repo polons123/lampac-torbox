@@ -478,7 +478,7 @@
     var active = Lampa.Activity.active() || {};
     return filmFromCard(torrent.movie || active.movie || active.card || active.activity && active.activity.object && active.activity.object.movie);
   }
-  function clarifyFilm(torrent, done, back, valid) {
+  function clarifyFilm(torrent, done, back, valid, selected) {
     var parsed = posterName(torrent.name);
     var suggested = torrent.film && torrent.film.title || parsed.titles[0] || '';
     Lampa.Input.edit({ title: 'Название фильма или сериала', value: suggested, free: true, nosave: true }, function (value) {
@@ -505,11 +505,12 @@
           return { title: escaped(film.title) + (film.year ? ' (' + film.year + ')' : ''), subtitle: escaped(film.original_title) + ' · ' + (film.media_type === 'tv' ? 'Сериал' : 'Фильм'),
             run: function () {
               if (!valid()) return;
+              if (selected) return selected(film);
               request('metadata', { id: torrent.id, film: film }, function () { if (valid()) done(); }, function () { if (valid()) back(); });
             } };
         });
         var retry = { title: found.length ? 'Изменить поиск' : failures || pending ? 'Ошибка поиска · повторить' : 'Не найдено · изменить поиск',
-          run: function () { clarifyFilm(torrent, done, back, valid); } };
+          run: function () { clarifyFilm(torrent, done, back, valid, selected); } };
         actions.push(retry);
         choose('Выберите фильм или сериал', actions, back);
       }
@@ -534,6 +535,7 @@
       });
     });
   }
+  window.lampac_choose_film = clarifyFilm;
   // Keep delayed verification across activity changes and client reloads; no API keys.
   var deletionQueue = Lampa.Storage.get('torbox_deletions_v1', []);
   if (!Array.isArray(deletionQueue)) deletionQueue = [];
