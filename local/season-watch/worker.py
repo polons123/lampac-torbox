@@ -189,6 +189,10 @@ def invalidated(row, reason):
     row.pop('candidate',None)
 
 def scan(p,st):
+    for key,receipt in list(st.get('deletions',{}).items()):
+        if receipt['due']<=time.time():
+            try: verify_deletion(p,st,*key.split(':',1))
+            except ERRORS: pass
     for place in NAMES:
         now=int(time.time())
         try:
@@ -280,7 +284,8 @@ def card(t,place):
     poster=t.get('poster') or ''
     image=re.search(r'/([a-zA-Z0-9_-]+\.(?:jpg|png|webp))$',urlsplit(poster).path)
     return dict(place=place,hash=t['hash'],title=t['title'] or display_name(t),label=t['label'][:400],
-        poster='/'+image.group(1) if image else '',year=t.get('year',''),movie=t['movie'])
+        poster='/'+image.group(1) if image else '',year=t.get('year',''),movie=t['movie'],
+        box_id=t['raw'].get('id') if place=='box' else None)
 
 def catalog(p,st):
     cards=[]
@@ -301,7 +306,8 @@ def catalog(p,st):
                 watches=[w for w in st['watches'].values() if w['place']==place and w['hash']==h]
                 data['seasons']=sorted([dict(n=w['season'],id=w['id'],ready=w['ready'],waiting=w['waiting'],tmdb=w.get('tmdb')) for w in watches if w['season']],key=lambda x:x['n'])
                 cards.append(data)
-    return dict(cards=cards,errors=errors)
+    return dict(cards=cards,errors=errors,pending=[dict(place=k.split(':')[0],hash=k.split(':')[1],due=r['due'])
+        for k,r in st.get('deletions',{}).items()])
 
 def existing(p,place,h):
     if place not in NAMES or not HASH.fullmatch(h):
@@ -352,7 +358,80 @@ def movie_offer(p,st,t,w,selection):
             raise Unavailable('В новой версии нет видеофайлов')
         w.update(candidate=new['hash'],new_label=new['label'],source=new)
 
+def pending_status(receipt):
+    return dict(pending=True,due=receipt['due'],message='Ожидается подтверждение удаления')
+
+def verify_deletion(p,st,place,h):
+    key=place+':'+h
+    receipt=st.get('deletions',{}).get(key)
+    if not receipt:
+        return dict(pending=False,message='Список раздач обновлён')
+    now=int(time.time())
+    if now<receipt['due']: return pending_status(receipt)
+    if receipt.get('ticket'):
+        try:
+            reply=p.box_deletion(receipt['actor'],dict(ticket=receipt['ticket'],scope=receipt['scope'],id=receipt['id']),check=True)
+            if reply.get('pending'):
+                receipt['due']=max(now+5,int(reply.get('check_after',0))//1000)
+                save(st)
+                return pending_status(receipt)
+        except ERRORS:
+            # A missing ticket or expired Lampac session can still be reconciled from live inventory.
+            pass
+    inventory=p.inventory(place)
+    same=[t for t in inventory if t['hash']==h]
+    still_present=any(t['raw'].get('id')==receipt['id'] for t in same) if place=='box' else bool(same)
+    if still_present and now<receipt['until']:
+        receipt['due']=now+5
+        save(st)
+        return pending_status(receipt)
+    del st['deletions'][key]
+    if still_present:
+        save(st)
+        return dict(pending=False,confirmed=False,message='Источник пока показывает раздачу. Удаление не подтверждено')
+    st.setdefault('catalog',{})[place]=[card(t,place) for t in inventory]
+    st['totals'][place]=len(inventory)
+    if not same:
+        for wid,w in list(st['watches'].items()):
+            if w['place']==place and w['hash']==h:
+                del st['watches'][wid]
+                st['sources'].pop(wid,None)
+        st['sources'].pop(item_id(place,h,0),None)
+        st['replaced'].pop(key,None)
+    save(st)
+    return dict(pending=False,confirmed=True,message='Раздача удалена · '+NAMES[place])
+
+def remove_release(p,st,place,h,expected_id,actor):
+    key=place+':'+h
+    if key in st.get('deletions',{}):
+        return verify_deletion(p,st,place,h)
+    t=existing(p,place,h)
+    if place=='box' and (type(expected_id) is not int or t['raw'].get('id')!=expected_id):
+        raise Unavailable('Карточка TorBox изменилась. Откройте её заново')
+    now=int(time.time())
+    receipt=dict(id=expected_id,due=now,until=now+120)
+    st.setdefault('deletions',{})[key]=receipt
+    # A retry after a network failure must only verify the first request.
+    save(st)
+    try:
+        if place=='box':
+            reply=p.box_deletion(actor,dict(id=expected_id,confirmed=True))
+            if reply.get('ticket') and reply.get('scope'):
+                receipt.update(actor=actor,ticket=reply['ticket'],scope=reply['scope'],
+                               due=max(now,int(reply.get('check_after',0))//1000))
+                save(st)
+        else:
+            p.ts(place,'rem',hash=h)
+    except ERRORS:
+        pass
+    try: return verify_deletion(p,st,place,h)
+    except ERRORS:
+        receipt['due']=max(int(time.time())+5,receipt['due'])
+        save(st)
+        return pending_status(receipt)
+
 def update_release(p,st,place,h,season,selection='',preview=False):
+    if place+':'+h in st.get('deletions',{}): raise Unavailable('Проверяется удаление этой раздачи')
     t=existing(p,place,h)
     if st['replaced'].get(place+':'+h) and any(a['hash']==st['replaced'][place+':'+h] for a in p.inventory(place)):
         return dict(message='Эта раздача уже обновлена')
@@ -415,6 +494,10 @@ def main():
                 scan(p,st)
                 save(st)
                 result=dict(inventory=st['totals'],seasons=len(st['watches']))
+            elif len(args)==4 and args[0]=='remove':
+                result=remove_release(p,st,args[1],args[2],int(args[3]) if args[3] else None,os.environ['SEASON_WATCH_ACTOR'])
+            elif len(args)==3 and args[0]=='verify-remove':
+                result=verify_deletion(p,st,args[1],args[2])
             elif len(args)==5 and args[0]=='update':
                 result=update_release(p,st,args[1],args[2],int(args[3]),args[4])
             else: raise Unavailable('Некорректная команда')

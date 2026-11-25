@@ -87,6 +87,48 @@ class Tests(unittest.TestCase):
         self.assertIn('актуальна',w.update_release(self.p,self.s,'home',A,0)['message'])
         self.p.rows=[jac(B)];w.update_release(self.p,self.s,'home',A,0)
         self.assertEqual(self.p.writes,[('home',B)])
+    def test_torrserver_remove_scoped(self):
+        for place in ('home','peer'):
+            with self.subTest(place=place):
+                self.p=Sources();self.scan();calls=[]
+                def remove(where,action,**fields):
+                    calls.append((where,action,fields))
+                    self.p.items[where]=[]
+                self.p.ts=remove
+                reply=w.remove_release(self.p,self.s,place,A,None,'viewer')
+                self.assertTrue(reply['confirmed'])
+                self.assertEqual(calls,[(place,'rem',{'hash':A})])
+                self.assertEqual(len(w.catalog(self.p,self.s)['cards']),2)
+                self.assertNotIn(self.get_id(place),self.s['watches'])
+    def get_id(self,place):
+        return w.item_id(place,A,2)
+    def test_torbox_delayed_and_retry(self):
+        self.p.items['box'][0]['raw']['id']=77
+        self.scan();calls=[]
+        def native(actor,body,check=False):
+            calls.append((actor,body,check))
+            if check:
+                self.p.items['box']=[]
+                return dict(success=True,deletion_confirmed=True)
+            return dict(success=True,ticket='receipt',scope='account',check_after=1060000)
+        self.p.box_deletion=native
+        with self.assertRaises(Unavailable): w.remove_release(self.p,self.s,'box',A,76,'viewer')
+        with patch('worker.time.time',return_value=1000):
+            self.assertTrue(w.remove_release(self.p,self.s,'box',A,77,'viewer')['pending'])
+            self.assertTrue(w.remove_release(self.p,self.s,'box',A,77,'viewer')['pending'])
+        self.assertEqual(calls,[('viewer',{'id':77,'confirmed':True},False)])
+        with patch('worker.time.time',return_value=1061):
+            self.assertTrue(w.verify_deletion(self.p,self.s,'box',A)['confirmed'])
+        self.assertEqual(len(calls),2)
+        self.assertEqual(len(w.catalog(self.p,self.s)['cards']),2)
+    def test_unconfirmed_preserves_card(self):
+        self.scan()
+        self.p.ts=lambda *args,**kwargs:None
+        with patch('worker.time.time',return_value=1000):
+            self.assertTrue(w.remove_release(self.p,self.s,'home',A,None,'viewer')['pending'])
+        with patch('worker.time.time',return_value=1121):
+            self.assertFalse(w.verify_deletion(self.p,self.s,'home',A)['confirmed'])
+        self.assertIn(self.get_id('home'),self.s['watches'])
     def test_destination_must_have_new_episode(self):
         self.scan();self.p.rows=[jac(B)];self.p.ts_files=lambda *args,**kwargs:[file(1)]
         with self.assertRaises(Unavailable):w.update_release(self.p,self.s,'peer',A,0)

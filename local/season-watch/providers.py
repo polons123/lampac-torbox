@@ -130,6 +130,15 @@ class Providers:
             raise Unavailable('TorBox отклонил запрос')
         return result.get('data')
 
+    def box_deletion(self, actor, body, check=False):
+        # Reuse the Lampac module's account guard, item deletion and metadata cleanup.
+        route='delete/check' if check else 'delete'
+        url='http://127.0.0.1:19092/torbox/'+route+'?'+parse.urlencode({'account_email':actor})
+        result=http(url,{'X-TorBox-Mode':'file'},body,timeout=45)
+        if not isinstance(result,dict) or not result.get('success'):
+            raise Unavailable('TorBox не подтвердил запрос')
+        return result
+
     def inventory(self, place):
         if place != 'box':
             return [unpack_ts(t) for t in self.ts(place, 'list')]

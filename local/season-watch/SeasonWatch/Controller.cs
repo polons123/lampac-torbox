@@ -62,12 +62,33 @@ public class SeasonWatchController : BaseController
             return Task.FromResult(Error(400,"Некорректный выбор"));
         return Run("update",input.place,input.hash,input.season.ToString(),input.choice??"");
     }
+    public class Removal {
+        public string place {get;set;}
+        public string hash {get;set;}
+        public long? box_id {get;set;}
+        public bool confirmed {get;set;}
+    }
+
+    [HttpPost, Route("season-watch/remove"), RequestSizeLimit(1024)]
+    public Task<ActionResult> Remove([FromBody] Removal input) {
+        if (Request.Headers["X-Season-Watch"]!="1" || input==null || !input.confirmed || !Valid(input.place,input.hash) ||
+            (input.place=="box" ? input.box_id==null || input.box_id<0 : input.box_id!=null))
+            return Task.FromResult(Error(400,"Подтвердите удаление выбранной раздачи"));
+        return Run("remove",input.place,input.hash,input.box_id?.ToString()??"");
+    }
+    [HttpPost, Route("season-watch/remove/check"), RequestSizeLimit(1024)]
+    public Task<ActionResult> CheckRemoval([FromBody] Removal input) {
+        if (Request.Headers["X-Season-Watch"]!="1" || input==null || !Valid(input.place,input.hash))
+            return Task.FromResult(Error(400,"Некорректная раздача"));
+        return Run("verify-remove",input.place,input.hash);
+    }
     async Task<ActionResult> Run(params string[] args) {
         Response.Headers["Cache-Control"]="private, no-store";
         if (!Allowed()) return Error(403,"Нет доступа к библиотекам");
         if (!await gate.WaitAsync(TimeSpan.FromSeconds(2))) return Error(429,"Источник занят. Повторите запрос");
         try {
             var info=new ProcessStartInfo("/usr/bin/python3") { UseShellExecute=false,RedirectStandardOutput=true };
+            if (args[0]=="remove") info.Environment["SEASON_WATCH_ACTOR"]=requestInfo.user_uid;
             info.ArgumentList.Add("/usr/local/lib/season-watch/worker.py");
             foreach (var arg in args) info.ArgumentList.Add(arg);
             using var process=Process.Start(info);
