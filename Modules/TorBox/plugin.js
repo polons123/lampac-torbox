@@ -863,6 +863,26 @@
     for (var k = 0; k < candidates.length; k++) if (/^https?:\/\//i.test(candidates[k] || '')) return candidates[k];
     return '';
   }
+  function addToTorBox(torrent, hash) {
+    if (busy) return Lampa.Noty.show('Запрос TorBox уже выполняется');
+    busy = true;
+    request('add', { link: torrentLink(torrent), hash: hash, film: currentFilm(torrent), allow_download: true }, function (j) {
+      busy = false;
+      Lampa.Noty.show(j.existing ? 'Раздача уже есть в вашем TorBox' : 'Раздача добавлена в TorBox');
+    }, function () { busy = false; });
+  }
+  function addToTorrServer(torrent, movie, hash) {
+    if (!Lampa.Torserver || !Lampa.Torserver.url()) return Lampa.Noty.show('Укажите адрес TorrServer в настройках Lampa');
+    var title = movie && (movie.title || movie.name);
+    var original = movie && (movie.original_title || movie.original_name);
+    Lampa.Torserver.add({
+      link: torrentLink(torrent) || 'magnet:?xt=urn:btih:' + hash,
+      title: title ? [title, original].filter(Boolean).join(' / ') : torrent.Title || torrent.title || hash,
+      poster: movie && movie.img || torrent.poster,
+      data: movie ? { lampa: true, movie: movie } : null
+    }, function () { Lampa.Noty.show('Раздача добавлена в TorrServer'); },
+    function () { Lampa.Noty.show('Не удалось добавить раздачу в TorrServer'); });
+  }
   function watch(t, film, allowDownload, cacheMissing) {
     if (busy) return Lampa.Noty.show('Запрос TorBox уже выполняется');
     var link = torrentLink(t || {});
@@ -1270,7 +1290,9 @@
         }
         choose('Где воспроизвести раздачу?', [
           { title: 'Воспроизвести из кэша TorBox', run: function () { watch(torrent, currentFilm(torrent), false, missing); } },
-          { title: 'Воспроизвести через TorrServer', run: server }
+          { title: 'Воспроизвести через TorrServer', run: server },
+          { title: 'Добавить в TorBox', run: function () { back(); addToTorBox(torrent, hash); } },
+          { title: 'Добавить в TorrServer', run: function () { back(); addToTorrServer(torrent, movie, hash); } }
         ], back);
       }
       var known = session.states[hash];
