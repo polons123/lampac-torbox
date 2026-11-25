@@ -176,7 +176,8 @@ class Tests(unittest.TestCase):
         self.assertFalse(self.p.removals)
         self.assertEqual([t['hash'] for t in self.p.inventory('peer')],[A])
     def test_deferred_update_cleanup_survives_reload(self):
-        self.scan();self.p.rows=[jac(B)];original=self.p.box_deletion;calls=[]
+        self.scan();self.p.rows=[jac(B)];self.p.candidate=[file(3)]
+        original=self.p.box_deletion;calls=[]
         def native(actor,body,check=False):
             calls.append(check)
             if check:return original(actor,dict(id=body['id'],confirmed=True))
@@ -218,18 +219,16 @@ class Tests(unittest.TestCase):
         self.scan();self.p.rows=[jac(B)];self.p.ts_files=lambda *args,**kwargs:[file(1)]
         with self.assertRaises(Unavailable):self.update('peer',A,0)
         self.assertFalse(self.p.writes)
-    def test_partial_season_or_pack_preserves_original(self):
+    def test_update_accepts_only_new_episode_from_multiseason_pack(self):
         for items in self.p.items.values():
-            items[0]['files'].append(dict(name='Show.S01E01.mkv',size=100))
-        self.scan(); self.p.rows=[jac(B)]
-        for candidate in ([file(1),file(2),file(3)],[file(3)]):
-            self.p.candidate=candidate
-            with self.assertRaisesRegex(Unavailable,'S01E01'):
-                self.update('peer',A,2)
-            self.assertFalse(self.p.removals)
-            self.assertFalse(self.p.writes)
-        self.p.candidate=[*self.p.items['peer'][0]['files'],file(3)]
-        self.assertEqual(self.update('peer',A,2)['hash'],B)
+            items[0]['files'].extend([dict(name='Show.S01E01.mkv',size=100),
+                                      dict(name='Unknown episode.mkv',size=100)])
+        self.scan();self.p.rows=[jac(B)];self.p.candidate=[file(3)]
+        result=self.update('peer',A,2)
+        self.assertEqual(result['hash'],B)
+        self.assertEqual(result['ready'],[3])
+        self.assertEqual(self.p.removals,[('peer',A)])
+        self.assertEqual([row['hash'] for row in self.p.inventory('peer')],[B])
 
     def test_preview_pins_candidate_and_removal_set(self):
         self.scan();self.p.rows=[jac(B)]
@@ -249,6 +248,7 @@ class Tests(unittest.TestCase):
 
     def test_incomplete_destination_after_valid_preview(self):
         self.scan();self.p.rows=[jac(B)]
+        self.p.candidate=[file(3),file(4)]
         self.p.ts_files=lambda *a,**kw:[file(3)]
         with self.assertRaises(Unavailable): self.update('peer',A,2)
         self.assertFalse(self.p.removals)
@@ -284,12 +284,28 @@ class Tests(unittest.TestCase):
         with patch.object(p,'json_file',return_value={'api_key':'fixture'}),patch('providers.http',return_value=[]):
             with self.assertRaises(Unavailable): p.box('mylist')
 
-    def test_retired_versions_are_in_coverage(self):
+    def test_archived_versions_removed_without_requesting_their_files(self):
         self.scan();self.p.rows=[jac(B)]
         self.s['replaced']['peer:'+C]=A
-        self.p.items['peer'].append(torrent(C,[dict(name='Show.S01E07.mkv',size=100)]))
-        with self.assertRaisesRegex(Unavailable,'S01E07'): self.update('peer',A,2)
-        self.assertFalse(self.p.removals or self.p.writes)
+        self.p.items['peer'].append(torrent(C,[]))
+        original=self.p.ts_files
+        def get_files(place,h,**kw):
+            self.assertNotEqual(h,C)
+            return original(place,h,**kw)
+        self.p.ts_files=get_files
+        self.assertEqual(self.update('peer',A,2)['hash'],B)
+        self.assertEqual(self.p.removals,[('peer',C),('peer',A)])
+
+    def test_old_cleanup_receipt_ignores_old_episode_list(self):
+        self.p.items['peer'].append(torrent(B,[file(3)]))
+        self.s['replaced']={'peer:'+A:B}
+        key=w.stage_group(self.s,'peer',B,self.p.items['peer'],'viewer',keep=B)
+        job=self.s['removal_groups'][key]
+        del job['ready'],job['season']
+        job.update(required=[[2,1],[2,2],[2,3]],hint=2)
+        w.save(self.s)
+        self.assertTrue(w.check_removal(self.p,w.state(),'peer',B)['confirmed'])
+        self.assertEqual(self.p.removals,[('peer',A)])
 
     def test_stale_data_and_shared_hash_pruning(self):
         self.p.rows=[jac(B)]

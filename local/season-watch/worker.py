@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from providers import BAD, HASH, NAMES, VIDEO, Providers, Unavailable, digest, episode_files, season_hint
+from providers import HASH, NAMES, VIDEO, Providers, Unavailable, digest, episode_files, season_hint
 from urllib.parse import quote, urlsplit
 from concurrent.futures import ThreadPoolExecutor
 
@@ -272,39 +272,14 @@ def save(st):
 def revision(w):
     return digest(json.dumps([w['hash'],w.get('candidate'),w['ready'],w['choices'],w['identities']],sort_keys=True))[:32]
 
-def episode_numbers(files,hint,strict=False):
-    numbers=set()
-    for f in files:
-        name=f.get('path') or f.get('name') or ''
-        if not VIDEO.search(name) or BAD.search(name): continue
-        parsed=episode_files([f],hint)
-        if strict and not parsed:
-            raise Unavailable('Не удалось определить номер старой серии. Замена остановлена')
-        numbers.update((int(s),int(e)) for s,episodes in parsed.items() for e in episodes)
-    return numbers
-
 def media_files(p,place,row):
     return row['files'] or (p.ts_files(place,row['hash']) if place!='box' else [])
 
-def required_episodes(p,place,rows,season):
-    required=set()
-    for row in rows:
-        files=media_files(p,place,row)
-        if season or row['tv'] or not row['movie']:
-            hint=season_hint(row['label'])
-            numbers=episode_numbers(files,hint)
-            if numbers or season or row['tv'] or hint:
-                numbers=episode_numbers(files,hint,strict=True)
-                if not numbers: raise Unavailable('Нет списка серий старой раздачи')
-                required.update(numbers)
-            elif sum(bool(VIDEO.search(f.get('path') or f.get('name') or '')) for f in files)!=1:
-                raise Unavailable('Не удалось определить состав старой раздачи')
-    return required
-
-def destination_has(files,w):
-    if not w['season'] and not w.get('required'):
+def destination_has(files,season,ready):
+    if not season:
         return any(VIDEO.search(f.get('path') or f.get('name') or '') for f in files)
-    return set(w['required']).issubset(episode_numbers(files,season_hint(w.get('new_label') or '') or w['season']))
+    episodes=episode_files(files,season).get(season,{})
+    return bool(ready) and all(str(n) in episodes for n in ready)
 
 def apply(p,st,w,t):
     h=w['candidate']
@@ -315,7 +290,7 @@ def apply(p,st,w,t):
     else:
         already_present=any(o['hash']==h for o in p.inventory(place))
         # The destination resolves the magnet before the persistent save.
-        if not destination_has(p.ts_files(place,h),w):
+        if not destination_has(p.ts_files(place,h),w['season'],w['ready']):
             raise Unavailable('Целевой TorrServer не подтвердил файлы')
         if not already_present:
             raw=t['raw']
@@ -335,8 +310,7 @@ def apply(p,st,w,t):
         inventory=p.inventory(place)
         row=next((a for a in inventory if a['hash']==h),None)
         if row and (place!='box' or row['raw'].get('download_present')):
-            files=row['files'] or (p.ts_files(place,h) if place!='box' else [])
-            if destination_has(files,w):
+            if destination_has(media_files(p,place,row),w['season'],w['ready']):
                 return row
         time.sleep(2)
     raise Unavailable('Источник ещё не подтвердил сохранение. Старая версия доступна')
@@ -535,7 +509,7 @@ def grouped_receipts(st):
     return {key.split(':')[0]+':'+member['hash'] for key,job in st.get('removal_groups',{}).items()
             for member in job['members']}
 
-def stage_group(st,place,head,inventory,actor,keep=None,required=None,hint=None):
+def stage_group(st,place,head,inventory,actor,keep=None,season=0,ready=None):
     versions=earlier_versions(st,place,head)
     if not keep: versions.append(head)
     by_hash={t['hash']:t for t in inventory}
@@ -543,7 +517,7 @@ def stage_group(st,place,head,inventory,actor,keep=None,required=None,hint=None)
     if place=='box' and (not actor or any(type(m['id']) is not int for m in members)):
         raise Unavailable('Не удалось проверить ID версий в аккаунте TorBox')
     key=place+':'+head
-    st.setdefault('removal_groups',{})[key]=dict(members=members,actor=actor,keep=keep,required=required,hint=hint,
+    st.setdefault('removal_groups',{})[key]=dict(members=members,actor=actor,keep=keep,season=season,ready=ready,
         head_id=by_hash.get(head,{}).get('raw',{}).get('id'),
         keep_id=by_hash.get(keep,{}).get('raw',{}).get('id'),due=int(time.time()))
     save(st)
@@ -564,16 +538,8 @@ def advance_group(p,st,key):
             live=p.inventory(place)
             keep=next((row for row in live if row['hash']==job['keep'] and
                        (place!='box' or (row['raw'].get('id')==job['keep_id'] and row['raw'].get('download_present')))),None)
-            complete=True
-            if job['keep'] and keep:
-                if job.get('required') is None:
-                    hashes={m['hash'] for m in job['members']}
-                    required=required_episodes(p,place,[row for row in live if row['hash'] in hashes],0)
-                else:
-                    required=set(map(tuple,job['required']))
-                files=media_files(p,place,keep)
-                complete=bool(files) and required.issubset(episode_numbers(files,job.get('hint') or season_hint(keep['label'])))
-            if job['keep'] and (not keep or not complete):
+            if job['keep'] and (not keep or not destination_has(
+                    media_files(p,place,keep),job.get('season',0),job.get('ready'))):
                 # Bring the last surviving predecessor of each branch back into the catalog.
                 available={t['hash'] for t in live}
                 for old in earlier_versions(st,place,head):
@@ -713,22 +679,9 @@ def update_release(p,st,place,h,season,selection='',confirmation='',actor=None):
     newh=w['candidate']
     predecessors=set(earlier_versions(st,place,h)+earlier_versions(st,place,newh)+[h])
     retiring=sorted((row for row in previous if row['hash'] in predecessors),key=lambda row:row['hash'])
-    required=required_episodes(p,place,retiring,season)
-    if season:
-        for old in retiring:
-            for n,episodes in st['files'].get(old['hash'],{}).items():
-                required.update((int(n),int(ep)) for ep in episodes)
-    required.update((season,n) for n in w['ready'])
-    w['required']=sorted(required)
-    if required:
-        available=episode_numbers(p.candidate_files(place,newh),season_hint(w['new_label']) or season)
-        missing=sorted(required-available)
-        if missing:
-            labels=', '.join(f'S{s:02}E{e:02}' for s,e in missing[:8])
-            raise Unavailable('В новой раздаче отсутствуют серии: '+labels)
     retiring_cards=[dict(hash=row['hash'],label=row['label'],id=row['raw'].get('id')) for row in retiring]
     offer=dict(place=place,original=h,candidate=newh,label=w['new_label'],season=season,ready=w['ready'],
-               versions=retiring_cards,required=w['required'],source=w['source']['page'],
+               versions=retiring_cards,source=w['source']['page'],
                candidate_id=next((row['raw'].get('id') for row in previous if row['hash']==newh),None))
     signature=digest(json.dumps(offer,sort_keys=True,ensure_ascii=False))
     if not confirmation:
@@ -750,7 +703,7 @@ def update_release(p,st,place,h,season,selection='',confirmation='',actor=None):
     st['sources'].pop(item_id(place,h,season),None)
     st['sources'][item_id(place,newh,season)]=w['source']
     # Publish the verified replacement and the cleanup intent in one state write.
-    key=stage_group(st,place,newh,previous+[new],actor,keep=newh,required=w['required'],hint=season_hint(w['new_label']) or season)
+    key=stage_group(st,place,newh,previous+[new],actor,keep=newh,season=season,ready=w['ready'])
     cleanup=advance_group(p,st,key)
     if cleanup.get('missing'): return cleanup
     message='Раздача обновлена. '+('Ожидается удаление предыдущих версий' if cleanup.get('pending') else cleanup['message'])
