@@ -189,7 +189,13 @@ def invalidated(row, reason):
     row.pop('candidate',None)
 
 def scan(p,st):
+    for group,job in list(st.get('removal_groups',{}).items()):
+        if not job.get('failed') and job['due']<=time.time():
+            try: advance_group(p,st,group)
+            except ERRORS: pass
+    grouped=grouped_receipts(st)
     for key,receipt in list(st.get('deletions',{}).items()):
+        if key in grouped: continue
         if receipt['due']<=time.time():
             try: verify_deletion(p,st,*key.split(':',1))
             except ERRORS: pass
@@ -203,10 +209,11 @@ def scan(p,st):
                 if w['place']==place: invalidated(w,'Источник недоступен. Сохранён предыдущий календарь')
             continue
         available={t['hash'] for t in inventory}
-        for retired, replacement in list(st['replaced'].items()):
+        for retired in list(st['replaced']):
             site,old=retired.split(':',1)
-            if site==place and old in available and replacement not in available:
-                del st['replaced'][retired]
+            # The old copy remains archived until it actually leaves this provider.
+            if site==place and old not in available:
+                unlink_version(st,site,old)
         st.setdefault('catalog',{})[place]=[card(t,place) for t in inventory]
         st['totals'][place]=len(inventory)
         fresh={}
@@ -298,16 +305,18 @@ def catalog(p,st):
             except ERRORS as exc:
                 errors[place]=optional_label(exc)
                 items=st.get('catalog',{}).get(place,[])
-            present={a['hash'] for a in items}
             for data in items:
                 h=data['hash']
-                if st['replaced'].get(place+':'+h) in present: continue
+                if place+':'+h in st['replaced']: continue
                 data=dict(data)
                 watches=[w for w in st['watches'].values() if w['place']==place and w['hash']==h]
                 data['seasons']=sorted([dict(n=w['season'],id=w['id'],ready=w['ready'],waiting=w['waiting'],tmdb=w.get('tmdb')) for w in watches if w['season']],key=lambda x:x['n'])
                 cards.append(data)
+    grouped=grouped_receipts(st)
+    pending={k:r for k,r in st.get('deletions',{}).items() if k not in grouped}
+    pending.update({k:j for k,j in st.get('removal_groups',{}).items() if not j.get('failed')})
     return dict(cards=cards,errors=errors,pending=[dict(place=k.split(':')[0],hash=k.split(':')[1],due=r['due'])
-        for k,r in st.get('deletions',{}).items()])
+        for k,r in pending.items()])
 
 def existing(p,place,h):
     if place not in NAMES or not HASH.fullmatch(h):
@@ -397,11 +406,11 @@ def verify_deletion(p,st,place,h):
                 del st['watches'][wid]
                 st['sources'].pop(wid,None)
         st['sources'].pop(item_id(place,h,0),None)
-        st['replaced'].pop(key,None)
+        unlink_version(st,place,h)
     save(st)
     return dict(pending=False,confirmed=True,message='Раздача удалена · '+NAMES[place])
 
-def remove_release(p,st,place,h,expected_id,actor):
+def remove_one(p,st,place,h,expected_id,actor):
     key=place+':'+h
     if key in st.get('deletions',{}):
         return verify_deletion(p,st,place,h)
@@ -430,10 +439,149 @@ def remove_release(p,st,place,h,expected_id,actor):
         save(st)
         return pending_status(receipt)
 
-def update_release(p,st,place,h,season,selection='',preview=False):
+def unlink_version(st,place,h):
+    successor=st['replaced'].pop(place+':'+h,None)
+    if successor:
+        for key,parent in list(st['replaced'].items()):
+            if key.startswith(place+':') and parent==h:
+                st['replaced'][key]=successor
+
+def earlier_versions(st,place,head):
+    # Walk recorded successful replacements only, never infer editions from a show title.
+    found={head}
+    frontier=[head]
+    order=[]
+    parents={}
+    for k,successor in st['replaced'].items():
+        source,old=k.split(':',1)
+        if source==place: parents.setdefault(successor,[]).append(old)
+    while frontier:
+        for old in parents.get(frontier.pop(),[]):
+            if old not in found:
+                found.add(old)
+                frontier.append(old)
+                order.append(old)
+    return list(reversed(order))
+
+def grouped_receipts(st):
+    return {key.split(':')[0]+':'+member['hash'] for key,job in st.get('removal_groups',{}).items()
+            for member in job['members']}
+
+def stage_group(st,place,head,inventory,actor,keep=None):
+    versions=earlier_versions(st,place,head)
+    if not keep: versions.append(head)
+    by_hash={t['hash']:t for t in inventory}
+    members=[dict(hash=h,id=by_hash[h]['raw'].get('id')) for h in versions if h in by_hash and h!=keep]
+    if place=='box' and (not actor or any(type(m['id']) is not int for m in members)):
+        raise Unavailable('Не удалось проверить ID версий в аккаунте TorBox')
+    key=place+':'+head
+    st.setdefault('removal_groups',{})[key]=dict(members=members,actor=actor,keep=keep,
+        head_id=by_hash.get(head,{}).get('raw',{}).get('id'),
+        keep_id=by_hash.get(keep,{}).get('raw',{}).get('id'),due=int(time.time()))
+    save(st)
+    return key
+
+def advance_group(p,st,key):
+    place,head=key.split(':',1)
+    job=st['removal_groups'][key]
+    def stop(detail):
+        job['failed']=detail
+        save(st)
+        return dict(pending=False,confirmed=False,message=detail)
+    if job.get('failed'):
+        return dict(pending=False,confirmed=False,message=job['failed'])
+    for member in list(job['members']):
+        h=member['hash']
+        try:
+            live=p.inventory(place)
+            if job['keep'] and not any(t['hash']==job['keep'] and
+                    (place!='box' or (t['raw'].get('id')==job['keep_id'] and t['raw'].get('download_present'))) for t in live):
+                # Bring the last surviving predecessor of each branch back into the catalog.
+                available={t['hash'] for t in live}
+                for old in earlier_versions(st,place,head):
+                    if old not in available: unlink_version(st,place,old)
+                for old in earlier_versions(st,place,head):
+                    if st['replaced'].get(place+':'+old)==head:
+                        del st['replaced'][place+':'+old]
+                del st['removal_groups'][key]
+                save(st)
+                return dict(pending=False,confirmed=False,missing=True,
+                            message='Новая версия недоступна. Очистка предыдущих версий остановлена')
+            present=any(t['hash']==h and (place!='box' or t['raw'].get('id')==member['id']) for t in live)
+            receipt=st.get('deletions',{}).get(place+':'+h)
+            if receipt:
+                result=verify_deletion(p,st,place,h)
+            elif not present:
+                result=dict(confirmed=True)
+            elif member.get('sent'):
+                return stop('Источник ещё показывает версию. Для повторной попытки откройте карточку')
+            else:
+                member['sent']=True
+                save(st)
+                result=remove_one(p,st,place,h,member['id'],job['actor'])
+        except ERRORS:
+            job['due']=int(time.time())+15
+            save(st)
+            return pending_status(job)
+        if result.get('pending'):
+            job['due']=result['due']
+            save(st)
+            return pending_status(job)
+        if not result.get('confirmed'):
+            return stop(result.get('message') or 'Удаление версии не подтверждено')
+        job['members'].remove(member)
+        unlink_version(st,place,h)
+        save(st)
+    del st['removal_groups'][key]
+    save(st)
+    return dict(pending=False,confirmed=True,message=('Предыдущие версии удалены' if job['keep'] else 'Все версии раздачи удалены')+' · '+NAMES[place])
+
+def retry_group(p,st,key):
+    job=st['removal_groups'][key]
+    if job.pop('failed',None):
+        for member in job['members']: member.pop('sent',None)
+        save(st)
+    return advance_group(p,st,key)
+
+def remove_release(p,st,place,h,expected_id,actor):
+    key=place+':'+h
+    group=st.get('removal_groups',{}).get(key)
+    if group and not group['keep']:
+        if place=='box' and expected_id!=group['head_id']:
+            raise Unavailable('Карточка TorBox изменилась')
+        return retry_group(p,st,key)
+    inventory=p.inventory(place)
+    target=next((t for t in inventory if t['hash']==h),None)
+    if not target: raise Unavailable('Раздача уже отсутствует в этой библиотеке')
+    if place=='box' and (type(expected_id) is not int or target['raw'].get('id')!=expected_id):
+        raise Unavailable('Карточка TorBox изменилась. Откройте её заново')
+    if group and group['keep']:
+        # Same head, same source. Preserve all unfinished cleanup receipts when extending
+        # the operation to the active release after explicit deletion confirmation.
+        if place=='box' and group['keep_id']!=expected_id: raise Unavailable('Карточка TorBox изменилась')
+        group.update(keep=None,head_id=expected_id,actor=actor)
+        group['members'].append(dict(hash=h,id=expected_id))
+        save(st)
+    else:
+        if key in grouped_receipts(st) or key in st['replaced']:
+            raise Unavailable('Версия раздачи изменилась. Обновите каталог')
+        stage_group(st,place,h,inventory,actor)
+    return retry_group(p,st,key)
+
+def check_removal(p,st,place,h):
+    key=place+':'+h
+    return advance_group(p,st,key) if key in st.get('removal_groups',{}) else verify_deletion(p,st,place,h)
+
+def update_release(p,st,place,h,season,selection='',preview=False,actor=None):
+    key=place+':'+h
+    prior=st.get('removal_groups',{}).get(key)
+    if prior:
+        if prior['keep'] and not preview: return retry_group(p,st,key)
+        raise Unavailable('Выполняется удаление версий')
+    if key in grouped_receipts(st): raise Unavailable('Эта версия удаляется')
     if place+':'+h in st.get('deletions',{}): raise Unavailable('Проверяется удаление этой раздачи')
     t=existing(p,place,h)
-    if st['replaced'].get(place+':'+h) and any(a['hash']==st['replaced'][place+':'+h] for a in p.inventory(place)):
+    if place+':'+h in st['replaced']:
         return dict(message='Эта раздача уже обновлена')
     known={} if t['movie'] else (st['files'].get(h) or {})
     if not t['movie'] and not known:
@@ -464,6 +612,13 @@ def update_release(p,st,place,h,season,selection='',preview=False):
     if not w.get('candidate'):
         return dict(message=w['detail'] or ('Новых серий пока нет' if known else 'Раздача актуальна'))
     if preview: return dict(candidate=w['candidate'],ready=w['ready'])
+    if place=='box' and not actor: raise Unavailable('Требуется действующий аккаунт Lampac')
+    target_key=place+':'+w['candidate']
+    if target_key in st['replaced'] or target_key in st.get('deletions',{}) or target_key in st.get('removal_groups',{}) or target_key in grouped_receipts(st):
+        raise Unavailable('Для выбранной версии уже выполнялась замена или удаление')
+    previous=p.inventory(place)
+    if not any(row['hash']==h and (place!='box' or row['raw'].get('id')==t['raw'].get('id')) for row in previous):
+        raise Unavailable('Исходная раздача изменилась. Обновите каталог')
     new=apply(p,st,w,t)
     newh=new['hash']
     st['replaced'][place+':'+h]=newh
@@ -474,8 +629,12 @@ def update_release(p,st,place,h,season,selection='',preview=False):
             if bound: st['sources'][item_id(place,newh,oldrow['season'])]=bound
             del st['watches'][oldrow['id']]
     st['sources'][item_id(place,newh,season)]=w['source']
-    save(st)
-    return dict(message='Раздача обновлена',hash=newh,ready=w['ready'])
+    # Publish the verified replacement and the cleanup intent in one state write.
+    key=stage_group(st,place,newh,previous+[new],actor,keep=newh)
+    cleanup=advance_group(p,st,key)
+    if cleanup.get('missing'): return cleanup
+    message='Раздача обновлена. '+('Ожидается удаление предыдущих версий' if cleanup.get('pending') else cleanup['message'])
+    return dict(message=message,hash=newh,ready=w['ready'],pending=cleanup.get('pending',False))
 
 def main():
     os.umask(0o077)
@@ -497,9 +656,9 @@ def main():
             elif len(args)==4 and args[0]=='remove':
                 result=remove_release(p,st,args[1],args[2],int(args[3]) if args[3] else None,os.environ['SEASON_WATCH_ACTOR'])
             elif len(args)==3 and args[0]=='verify-remove':
-                result=verify_deletion(p,st,args[1],args[2])
+                result=check_removal(p,st,args[1],args[2])
             elif len(args)==5 and args[0]=='update':
-                result=update_release(p,st,args[1],args[2],int(args[3]),args[4])
+                result=update_release(p,st,args[1],args[2],int(args[3]),args[4],actor=os.environ.get('SEASON_WATCH_ACTOR'))
             else: raise Unavailable('Некорректная команда')
     print(json.dumps(result,ensure_ascii=False,separators=(',',':')))
 if __name__=='__main__':

@@ -85,7 +85,7 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
         for (let i=0;i<sites.length;i++){
             await until("$('.all-releases-card .all-releases-source').length==="+(3-i));
             await ev(card(sites[i][0]));await click('Удалить');
-            assert(await ev("testMenus.at(-1).title.includes("+JSON.stringify(sites[i][0])+")"));
+            assert(await ev("testMenus.at(-1).title.includes('Удалить все версии') && testMenus.at(-1).title.includes("+JSON.stringify(sites[i][0])+")"));
             assert.equal(await ev("testMenus.at(-1).items[0].title"),'Отмена');
             await click('Отмена');assert.equal(deletions.length,i);
             await click('Удалить');await click('Удалить');

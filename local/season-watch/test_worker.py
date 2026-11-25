@@ -23,6 +23,8 @@ class Sources:
         self.rows=[jac(A)]
         self.box_down=False
         self.writes=[]
+        self.removals=[]
+        self.items['box'][0]['raw']['id']=11
     def inventory(self,place):
         if place=='box' and self.box_down:raise Unavailable('HTTP 503')
         return self.items[place]
@@ -32,14 +34,23 @@ class Sources:
     def jac(self,*args,**kwargs): return self.rows
     def candidate_files(self,place,h):return self.candidate
     def ts(self,place,op,**kw):
-        assert op=='set' and kw['hash']==B
+        if op=='rem':
+            self.items[place]=[t for t in self.items[place] if t['hash']!=kw['hash']]
+            self.removals.append((place,kw['hash']))
+        else: assert op=='set' and kw['hash']==B
     def ts_files(self,place,h,save=False):
         if save:
             self.writes.append((place,h));self.items[place].append(torrent(h,self.candidate))
         return self.candidate
     def box(self,path,form):
         assert path=='createtorrent' and form['add_only_if_cached']=='true' and form['as_queued']=='false'
-        self.writes.append(('box',B));self.items['box'].append(torrent(B,self.candidate))
+        self.writes.append(('box',B));new=torrent(B,self.candidate);new['raw']['id']=12
+        self.items['box'].append(new)
+    def box_deletion(self,actor,body,check=False):
+        assert actor and body.get('confirmed') and not check
+        self.items['box']=[t for t in self.items['box'] if t['raw']['id']!=body['id']]
+        self.removals.append(('box',body['id']))
+        return dict(success=True,deletion_confirmed=True)
 
 class Tests(unittest.TestCase):
     def setUp(self):
@@ -59,16 +70,17 @@ class Tests(unittest.TestCase):
         self.p.rows[0].update(audio=[],voices=['Other'])
         result=w.update_release(self.p,self.s,'peer',A,0)
         self.assertEqual(result['ready'],[3]);self.assertEqual(self.p.writes,[('peer',B)])
-        self.assertEqual(len(self.p.inventory('peer')),2)
+        self.assertEqual([t['hash'] for t in self.p.inventory('peer')],[B]);self.assertEqual(self.p.removals,[('peer',A)])
         self.assertEqual([c['hash'] for c in w.catalog(self.p,self.s)['cards'] if c['place']=='peer'],[B])
-        w.update_release(self.p,self.s,'peer',A,0);self.assertEqual(len(self.p.writes),1)
+        with self.assertRaises(Unavailable):w.update_release(self.p,self.s,'peer',A,0)
+        self.assertEqual(len(self.p.writes),1)
     def test_no_new_episode(self):
         self.scan();self.p.rows=[jac(B)];self.p.candidate=[file(2,777)]
         self.assertIn('Новых',w.update_release(self.p,self.s,'peer',A,0)['message'])
         self.assertFalse(self.p.writes)
     def test_box_cache_and_outage(self):
         self.scan();self.p.rows=[jac(B)]
-        w.update_release(self.p,self.s,'box',A,0);self.assertEqual(self.p.writes,[('box',B)])
+        w.update_release(self.p,self.s,'box',A,0,actor='viewer');self.assertEqual(self.p.writes,[('box',B)])
         self.p.box_down=True
         catalog=w.catalog(self.p,self.s);self.assertIn('box',catalog['errors'])
         self.assertTrue(any(c['place']=='peer' for c in catalog['cards']))
@@ -118,16 +130,61 @@ class Tests(unittest.TestCase):
             self.assertTrue(w.remove_release(self.p,self.s,'box',A,77,'viewer')['pending'])
         self.assertEqual(calls,[('viewer',{'id':77,'confirmed':True},False)])
         with patch('worker.time.time',return_value=1061):
-            self.assertTrue(w.verify_deletion(self.p,self.s,'box',A)['confirmed'])
+            self.assertTrue(w.check_removal(self.p,self.s,'box',A)['confirmed'])
         self.assertEqual(len(calls),2)
         self.assertEqual(len(w.catalog(self.p,self.s)['cards']),2)
+    def test_delete_removes_whole_recorded_chain_only(self):
+        unrelated='f'*40
+        self.p.items['peer'] += [torrent(h,[file(1)]) for h in [B,C,unrelated]]
+        self.s['replaced']={'peer:'+A:B,'peer:'+B:C}
+        result=w.remove_release(self.p,self.s,'peer',C,None,'viewer')
+        self.assertTrue(result['confirmed'])
+        self.assertEqual(self.p.removals,[('peer',A),('peer',B),('peer',C)])
+        self.assertEqual([t['hash'] for t in self.p.inventory('peer')],[unrelated])
+        self.assertEqual([t['hash'] for t in self.p.inventory('home')],[A])
+    def test_update_failure_keeps_original(self):
+        self.scan();self.p.rows=[jac(B)];self.p.ts_files=lambda *args,**kwargs:[file(2)]
+        with self.assertRaises(Unavailable): w.update_release(self.p,self.s,'peer',A,0)
+        self.assertFalse(self.p.removals)
+        self.assertEqual([t['hash'] for t in self.p.inventory('peer')],[A])
+    def test_deferred_update_cleanup_survives_reload(self):
+        self.scan();self.p.rows=[jac(B)];original=self.p.box_deletion;calls=[]
+        def native(actor,body,check=False):
+            calls.append(check)
+            if check:return original(actor,dict(id=body['id'],confirmed=True))
+            return dict(success=True,ticket='abc',scope='fixture',check_after=1060000)
+        self.p.box_deletion=native
+        with patch('worker.time.time',return_value=1000):
+            r=w.update_release(self.p,self.s,'box',A,0,actor='viewer')
+            self.assertTrue(r['pending']);self.assertEqual(r['hash'],B)
+        with patch('worker.time.time',return_value=1061):
+            self.s=w.state()
+            self.assertTrue(w.check_removal(self.p,self.s,'box',B)['confirmed'])
+        self.assertEqual([t['hash'] for t in self.p.inventory('box')],[B])
+        self.assertEqual(calls,[False,True])
+    def test_cleanup_stops_if_new_version_gone(self):
+        self.p.items['peer'].append(torrent(B,[file(3)]))
+        self.s['replaced']={'peer:'+A:B}
+        key=w.stage_group(self.s,'peer',B,self.p.items['peer'],'viewer',keep=B)
+        self.p.items['peer'].pop()
+        self.assertFalse(w.advance_group(self.p,self.s,key)['confirmed'])
+        self.assertFalse(self.p.removals)
+        self.s=w.state()
+        self.assertEqual([r['hash'] for r in w.catalog(self.p,self.s)['cards'] if r['place']=='peer'],[A])
+        self.assertTrue(w.remove_release(self.p,self.s,'peer',A,None,'viewer')['confirmed'])
+    def test_replacement_chain_stays_archived_during_outage(self):
+        self.p.items['box']=[torrent(A,[file(1)]),torrent(B,[file(1),file(2)])]
+        self.s['replaced']={'box:'+A:B,'box:'+B:C}
+        self.scan();self.p.box_down=True
+        self.assertFalse(any(c['place']=='box' for c in w.catalog(self.p,self.s)['cards']))
+        self.assertEqual(len(self.s['replaced']),2)
     def test_unconfirmed_preserves_card(self):
         self.scan()
         self.p.ts=lambda *args,**kwargs:None
         with patch('worker.time.time',return_value=1000):
             self.assertTrue(w.remove_release(self.p,self.s,'home',A,None,'viewer')['pending'])
         with patch('worker.time.time',return_value=1121):
-            self.assertFalse(w.verify_deletion(self.p,self.s,'home',A)['confirmed'])
+            self.assertFalse(w.check_removal(self.p,self.s,'home',A)['confirmed'])
         self.assertIn(self.get_id('home'),self.s['watches'])
     def test_destination_must_have_new_episode(self):
         self.scan();self.p.rows=[jac(B)];self.p.ts_files=lambda *args,**kwargs:[file(1)]

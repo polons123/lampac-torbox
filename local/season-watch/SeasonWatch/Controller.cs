@@ -88,7 +88,7 @@ public class SeasonWatchController : BaseController
         if (!await gate.WaitAsync(TimeSpan.FromSeconds(2))) return Error(429,"Источник занят. Повторите запрос");
         try {
             var info=new ProcessStartInfo("/usr/bin/python3") { UseShellExecute=false,RedirectStandardOutput=true };
-            if (args[0]=="remove") info.Environment["SEASON_WATCH_ACTOR"]=requestInfo.user_uid;
+            if (args[0]=="remove" || args[0]=="update") info.Environment["SEASON_WATCH_ACTOR"]=requestInfo.user_uid;
             info.ArgumentList.Add("/usr/local/lib/season-watch/worker.py");
             foreach (var arg in args) info.ArgumentList.Add(arg);
             using var process=Process.Start(info);

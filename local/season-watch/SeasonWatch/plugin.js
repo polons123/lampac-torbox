@@ -120,9 +120,9 @@
             if (!current()) return;
             if (removing[k]) return message('Удаление уже проверяется');
             var source=c.place==='box'?'Общий аккаунт TorBox':names[c.place];
-            select('Удалить «'+c.title+'»? · '+source,[
+            select('Удалить все версии «'+c.title+'»? · '+source,[
                 {title:'Отмена',run:function () {if (current()) actions(c);}},
-                {title:'Удалить',subtitle:safe(c.label+' · '+names[c.place]+' · вся раздача со всеми файлами'),run:function () {
+                {title:'Удалить',subtitle:safe(c.label+' · '+names[c.place]+' · текущая и предыдущие версии этой раздачи'),run:function () {
                     if (!current() || removing[k]) return;
                     removing[k]=true;
                     request('season-watch/remove',{place:c.place,hash:c.hash,box_id:c.place==='box'?c.box_id:null,confirmed:true},function (r) {
@@ -140,7 +140,7 @@
                 read[eventKey({tmdb:s.tmdb,id:s.id,season:s.n},n)]=true;
             });}); Lampa.Storage.set(seenKey(),read);drawBadge();
             var rows=[{title:'Смотреть',subtitle:safe(c.label),run:function () {play(c);}},
-                {title:'Обновить',subtitle:names[c.place],run:function () {edit(c,0,'');}}];
+                {title:'Обновить',subtitle:names[c.place]+' · после успешного обновления прежние версии будут удалены',run:function () {edit(c,0,'');}}];
             if(c.place==='box') rows.push({title:'Управление TorBox',run:function () {
                 Lampa.Activity.push({component:'my_torbox',title:'Мой TorBox',page:1});
             }});
