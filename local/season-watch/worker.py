@@ -7,7 +7,9 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from providers import HASH, NAMES, Providers, Unavailable, digest, episode_files, season_hint
+from providers import HASH, NAMES, VIDEO, Providers, Unavailable, digest, episode_files, season_hint
+from urllib.parse import quote, urlsplit
+from concurrent.futures import ThreadPoolExecutor
 
 ROOT = Path('/var/lib/season-watch')
 STATE = ROOT / 'state.json'
@@ -62,36 +64,25 @@ def height(name):
         return int(match.group(1))
     return 2160 if re.search(r'\b4k\b',name,re.I) else 0
 
-def same_files(old, new):
-    # Keep every previously playable variant. A re-encode or ambiguous duplicate requires review.
-    return bool(old) and all(ep in new and sorted(files)==sorted(new[ep]) for ep,files in old.items())
+def additions(old,new):
+    return sorted({int(ep) for ep in new} - {int(ep) for ep in old})
 
-def full_preserved(old, new):
-    return bool(old) and all(same_files(eps,new.get(season,{})) for season,eps in old.items())
+def edition_tags(label):
+    # Release format and resolution identify an edition when a tracker changed the info hash.
+    return set(re.findall(r'web[- .]?dlrip|web[- .]?dl|webrip|bdremux|bdrip|blu[- .]?ray|hevc|avc|sdr|hdr',label.casefold()))
 
-def file_signature(name):
-    name=re.sub(r'(?<!\d)(2160|1080|720|480)[pр](?![a-z0-9])',r'\1',name,flags=re.I)
-    return re.sub(r'(s\d{1,2}[ ._-]*e)\d{1,3}',r'\1#',name.casefold(),flags=re.I)
+def edition(rows,t):
+    names={normalize(t['title']),normalize(t['original'])}-{''}
+    if not names: return None
+    known_height=height(t['label'])
+    if not known_height: return None
+    tags=edition_tags(t['label'])
+    matches=[r for r in rows if names & {normalize(r.get('title')),normalize(r.get('original'))}
+             and (height(r['label']) or r['height'])==known_height and edition_tags(r['label'])==tags]
+    return matches[0] if len({(r['hash'],r['page']) for r in matches})==1 else None
 
-def verified_additions(old, new, row, previous, label):
-    if not same_files(old,new):
-        return []
-    old_height=height(label)
-    if old_height and (height(row['label']) or row['height'])!=old_height:
-        return []
-    if previous:
-        if previous.get('height') and row['height']!=previous['height']:
-            return []
-        if not set(previous.get('voices',[])).issubset(row['voices']) or not set(previous.get('audio',[])).issubset(row['audio']):
-            return []
-    if not row['audio'] and not row['voices']:
-        return []
-    patterns={file_signature(name) for files in old.values() for name,_ in files}
-    result=[]
-    for ep in set(new)-set(old):
-        if len(new[ep])==1 and file_signature(new[ep][0][0]) in patterns:
-            result.append(int(ep))
-    return sorted(result)
+def choice_id(row):
+    return digest(row['page']+'|'+row['hash'])
 
 def item_id(place,h,season):
     return digest(f'{place}/{h}/{season}')[:32]
@@ -99,13 +90,14 @@ def item_id(place,h,season):
 def optional_label(error):
     return str(error) if isinstance(error,Unavailable) else 'Источник временно недоступен'
 
-def examine(p,st,t,w,all_files,old):
+def examine(p,st,t,w,old,interactive=False,selection=''):
     place,h,season=w['place'],w['hash'],w['season']
     existing={int(n) for n in old}
     missing=set()
     show={}
     complete=False
     try:
+        if not w.get('tmdb'): raise Unavailable('Нет календаря')
         calendar=p.calendar(f"tv/{w['tmdb']}/season/{season}")
         eps=calendar['episodes']
         missing={int(e['episode_number']) for e in eps if e.get('air_date') and e['air_date']<=TODAY()}-existing
@@ -115,7 +107,7 @@ def examine(p,st,t,w,all_files,old):
             w['detail']='Все серии из календаря уже есть'
             show=p.calendar(f"tv/{w['tmdb']}")
             later=(show.get('last_episode_to_air') or {}).get('season_number') or 0
-            if show.get('status') in ('Ended','Canceled') or later>season: return
+            if not interactive and (show.get('status') in ('Ended','Canceled') or later>season): return
     except ERRORS:
         w['detail']='Календарь временно недоступен'
     if not t['title'] and not show:
@@ -131,32 +123,30 @@ def examine(p,st,t,w,all_files,old):
         if len(exact)==1:
             binding=next(iter(exact.values()))
             st['sources'][key]=binding
-    if choices:
-        known_height=height(t['label'])
-        picks={}
-        for r in choices:
-            if known_height and (height(r['label']) or r['height']) not in (0,known_height):
-                continue
-            picks[r['page']]=dict(value=r['page'],label=r['label']+' · '+r['tracker'])
-        w['choices']=[v for k,v in picks.items() if not binding or binding['page']!=k]
-    if not binding:
-        if not complete:
-            w['detail']='Выберите исходную раздачу'
+    known_height=height(t['label'])
+    relevant=[r for r in choices if not known_height or (height(r['label']) or r['height']) in (0,known_height)]
+    unique={choice_id(r):r for r in relevant}
+    w['choices']=[dict(value=k,label=r['label']+' · '+r['tracker']) for k,r in unique.items()]
+    if selection:
+        if selection not in unique: raise Unavailable('Вариант изменился. Проверьте раздачу ещё раз')
+        binding=unique[selection]
+        st['sources'][key]=binding
+    if binding:
+        matches={r['hash']:r for r in choices if r['page']==binding['page']}
+        cand=unique[selection] if selection else next(iter(matches.values())) if len(matches)==1 else None
+    else:
+        cand=edition(relevant,t)
+    if not cand:
+        w['detail']='Выберите версию раздачи' if relevant else 'Подходящая раздача пока не найдена'
         return
-    matches={r['hash']:r for r in choices if r['page']==binding['page']}
-    if len(matches)!=1:
-        w['detail']='Исходная страница отсутствует или содержит несколько версий'
-        return
-    cand=next(iter(matches.values()))
+    w['choices']=[]
+    w['source']=cand
     if cand['hash']==h:
         return
     new=episode_files(p.candidate_files(place,cand['hash']),season)
-    if not full_preserved(all_files,new):
-        w['detail']='Изменился состав старых файлов. Требуется ручная проверка'
-        return
-    ready=verified_additions(old,new.get(season,{}),cand,binding,t['label'])
+    ready=additions(old,new.get(season,{}))
     if not ready:
-        w['detail']='Новая версия без подтверждённых дополнительных серий в том же варианте'
+        w['detail']='Новых серий пока нет'
         return
     w.update(ready=ready,waiting=sorted(missing-set(ready)),candidate=cand['hash'],new_label=cand['label'],detail='')
 
@@ -184,7 +174,7 @@ def item_rows(p,st,t,place,force=False):
             w.update(detail='Уточните сериал в TMDB',identities=ids)
         else:
             try:
-                examine(p,st,t,w,{int(s):e for s,e in known.items()},old)
+                examine(p,st,t,w,old)
             except ERRORS as exc:
                 w['detail']=optional_label(exc)
         out.append(w)
@@ -213,6 +203,7 @@ def scan(p,st):
             site,old=retired.split(':',1)
             if site==place and old in available and replacement not in available:
                 del st['replaced'][retired]
+        st.setdefault('catalog',{})[place]=[card(t,place) for t in inventory]
         st['totals'][place]=len(inventory)
         fresh={}
         for t in inventory:
@@ -236,13 +227,19 @@ def save(st):
     atomic(STATE,st)
     public=[]
     for w in st['watches'].values():
-        item={k:v for k,v in w.items() if k not in ('hash','candidate','new_label')}
+        item={k:v for k,v in w.items() if k not in ('hash','candidate','new_label','source')}
         item['revision']=revision(w)
         public.append(item)
     atomic(ROOT/'report.json',dict(items=public,checked=st['checked'],last=st.get('last',0)))
 
 def revision(w):
     return digest(json.dumps([w['hash'],w.get('candidate'),w['ready'],w['choices'],w['identities']],sort_keys=True))[:32]
+
+def destination_has(files,w):
+    if not w['season']:
+        return any(VIDEO.search(f.get('path') or f.get('name') or '') for f in files)
+    episodes=episode_files(files,w['season']).get(w['season'],{})
+    return bool(w['ready']) and all(str(n) in episodes for n in w['ready'])
 
 def apply(p,st,w,t):
     h=w['candidate']
@@ -253,9 +250,7 @@ def apply(p,st,w,t):
     else:
         already_present=any(o['hash']==h for o in p.inventory(place))
         # The destination resolves the magnet before the persistent save.
-        checked=episode_files(p.ts_files(place,h),w['season'])
-        baseline={int(s):e for s,e in st['files'][t['hash']].items()}
-        if not full_preserved(baseline,checked) or not all(str(n) in checked.get(w['season'],{}) for n in w['ready']):
+        if not destination_has(p.ts_files(place,h),w):
             raise Unavailable('Целевой TorrServer не подтвердил файлы')
         if not already_present:
             raw=t['raw']
@@ -275,65 +270,155 @@ def apply(p,st,w,t):
         inventory=p.inventory(place)
         row=next((a for a in inventory if a['hash']==h),None)
         if row and (place!='box' or row['raw'].get('download_present')):
-            actual=episode_files(row['files'] or p.ts_files(place,h),w['season'])
-            if not full_preserved({int(s):ep for s,ep in st['files'][t['hash']].items()},actual):
-                raise Unavailable('Сохранённая версия не прошла повторную проверку файлов')
-            if all(str(n) in actual.get(w['season'],{}) for n in w['ready']):
+            files=row['files'] or (p.ts_files(place,h) if place!='box' else [])
+            if destination_has(files,w):
                 return row
         time.sleep(2)
     raise Unavailable('Источник ещё не подтвердил сохранение. Старая версия доступна')
 
-def action(p,st,cmd,key,rev,value):
-    w=st['watches'].get(key)
-    if not w or revision(w)!=rev:
-        raise Unavailable('Список изменился. Откройте его заново')
-    inventory=p.inventory(w['place'])
-    t=next((a for a in inventory if a['hash']==w['hash']),None)
-    if not t:
-        raise Unavailable('Исходная раздача больше не сохранена')
-    if cmd=='identity' and any(c['value']==value for c in w['identities']):
-        st['identities'][w['hash']]=int(value)
-    elif cmd=='bind' and any(c['value']==value for c in w['choices']):
-        show=p.calendar(f"tv/{w['tmdb']}")
-        rows=p.jac(t['title'] or show['name'],t['original'] or show.get('original_name'))
-        matches={r['hash']:r for r in rows if r['page']==value}
-        if len(matches)!=1: raise Unavailable('Страница изменилась. Повторите проверку')
-        st['sources'][key]=next(iter(matches.values()))
-    elif cmd=='apply' and w.get('candidate') and w['ready']:
-        checked=next((r for r in item_rows(p,st,t,w['place'],force=True) if r['id']==key),{})
-        if checked.get('candidate')!=w['candidate'] or checked.get('ready')!=w['ready']:
-            raise Unavailable('Состав или доступность обновления изменились')
-        row=apply(p,st,checked,t)
-        # Keep the old provider object for existing players and Infuse links.
-        st['replaced'][w['place']+':'+w['hash']]=row['hash']
-        st['identities'][row['hash']]=w['tmdb']
-        for prev in list(st['watches'].values()):
-            if prev['place']==w['place'] and prev['hash']==w['hash']:
-                oldbinding=st['sources'].get(prev['id'])
-                if oldbinding: st['sources'][item_id(w['place'],row['hash'],prev['season'])]=oldbinding
-                st['watches'].pop(prev['id'])
-        t=row
-        t.update(tmdb=w['tmdb'],tv=True,title=w['title'])
+def card(t,place):
+    poster=t.get('poster') or ''
+    image=re.search(r'/([a-zA-Z0-9_-]+\.(?:jpg|png|webp))$',urlsplit(poster).path)
+    return dict(place=place,hash=t['hash'],title=t['title'] or display_name(t),label=t['label'][:400],
+        poster='/'+image.group(1) if image else '',year=t.get('year',''),movie=t['movie'])
+
+def catalog(p,st):
+    cards=[]
+    errors={}
+    with ThreadPoolExecutor(max_workers=len(NAMES)) as pool:
+        jobs={place:pool.submit(p.inventory,place) for place in NAMES}
+        for place,job in jobs.items():
+            try:
+                items=[card(t,place) for t in job.result()]
+            except ERRORS as exc:
+                errors[place]=optional_label(exc)
+                items=st.get('catalog',{}).get(place,[])
+            present={a['hash'] for a in items}
+            for data in items:
+                h=data['hash']
+                if st['replaced'].get(place+':'+h) in present: continue
+                data=dict(data)
+                watches=[w for w in st['watches'].values() if w['place']==place and w['hash']==h]
+                data['seasons']=sorted([dict(n=w['season'],id=w['id'],ready=w['ready'],waiting=w['waiting'],tmdb=w.get('tmdb')) for w in watches if w['season']],key=lambda x:x['n'])
+                cards.append(data)
+    return dict(cards=cards,errors=errors)
+
+def existing(p,place,h):
+    if place not in NAMES or not HASH.fullmatch(h):
+        raise Unavailable('Некорректная раздача')
+    t=next((t for t in p.inventory(place) if t['hash']==h),None)
+    if not t: raise Unavailable('Раздача больше не находится в этой библиотеке')
+    return t
+
+def media(p,place,h):
+    t=existing(p,place,h)
+    if place=='box' and not t['raw'].get('download_present'):
+        raise Unavailable('Раздача ещё загружается в TorBox')
+    files=t['files'] or (p.ts_files(place,h) if place!='box' else [])
+    rows=[]
+    for f in files:
+        name=f.get('path') or f.get('name') or ''
+        if not VIDEO.search(name) or f.get('id') is None: continue
+        idx=int(f['id'])
+        row=dict(name=name.rsplit('/',1)[-1],path=name,id=idx)
+        if place!='box':
+            row['url']=p.cfg['ts'][place]['url']+'/stream/'+quote(row['name'],safe='')+'?link='+h+'&index='+str(idx)+'&play'
+        rows.append(row)
+    return dict(files=rows,box_id=t['raw'].get('id') if place=='box' else None)
+
+def movie_offer(p,st,t,w,selection):
+    rows=p.jac(w['title'],t['original'],movie=True,year=int(t.get('year') or 0))
+    exact=[r for r in rows if r['hash']==t['hash']]
+    saved=st['sources'].get(w['id'])
+    if not saved and exact:
+        saved=exact[0]
+        st['sources'][w['id']]=saved
+    choices={choice_id(r):r for r in rows}
+    if selection:
+        if selection not in choices: raise Unavailable('Выбранная версия устарела')
+        saved=choices[selection]
+        st['sources'][w['id']]=saved
+    candidates={r['hash']:r for r in rows if saved and r['page']==saved['page']}
+    if not choices:
+        w['detail']='Исходная раздача пока не найдена'
+        return
+    if len(candidates)!=1:
+        w['choices']=[dict(value=k,label=r['label']+' · '+r['tracker']) for k,r in choices.items()]
+        return
+    new=next(iter(candidates.values()))
+    if new['hash']!=t['hash']:
+        files=p.candidate_files(w['place'],new['hash'])
+        if not any(VIDEO.search(f.get('path') or f.get('name') or '') for f in files):
+            raise Unavailable('В новой версии нет видеофайлов')
+        w.update(candidate=new['hash'],new_label=new['label'],source=new)
+
+def update_release(p,st,place,h,season,selection='',preview=False):
+    t=existing(p,place,h)
+    if st['replaced'].get(place+':'+h) and any(a['hash']==st['replaced'][place+':'+h] for a in p.inventory(place)):
+        return dict(message='Эта раздача уже обновлена')
+    known={} if t['movie'] else (st['files'].get(h) or {})
+    if not t['movie'] and not known:
+        known=episode_files(t['files'] or (p.ts_files(place,h) if place!='box' else []),season_hint(t['label']))
+        if known: st['files'][h]=known
+    if not season and len(known)>1:
+        return dict(seasons=sorted(map(int,known),reverse=True))
+    if not season and known: season=int(next(iter(known)))
+    w=make_row(t,place,season,'')
+    if known:
+        old=known.get(str(season)) or known.get(season)
+        if not old: raise Unavailable('Такого сезона нет в этой раздаче')
+        tmdb=t.get('tmdb') or st['identities'].get(h) or next((r.get('tmdb') for r in st['watches'].values() if r['hash']==h and r.get('tmdb')),None)
+        if not tmdb:
+            try: tmdb,_=identity(p,t,st)
+            except ERRORS: pass
+        w.update(tmdb=tmdb,owned=sorted(map(int,old)))
+        # Interactive search also works from the stored release title without TMDB metadata.
+        if not tmdb and not t['title']: t=dict(t,title=display_name(t))
+        examine(p,st,t,w,old,interactive=True,selection=selection)
+        st['watches'][w['id']]=w
+    elif t['tv']:
+        raise Unavailable('Пока не удалось распознать номера серий')
     else:
-        raise Unavailable('Действие уже недоступно')
-    for new in item_rows(p,st,t,w['place']):
-        st['watches'][new['id']]=new
+        movie_offer(p,st,t,w,selection)
+    if not preview: save(st)
+    if w['choices']: return dict(choices=w['choices'])
+    if not w.get('candidate'):
+        return dict(message=w['detail'] or ('Новых серий пока нет' if known else 'Раздача актуальна'))
+    if preview: return dict(candidate=w['candidate'],ready=w['ready'])
+    new=apply(p,st,w,t)
+    newh=new['hash']
+    st['replaced'][place+':'+h]=newh
+    if w.get('tmdb'):st['identities'][newh]=w['tmdb']
+    for oldrow in list(st['watches'].values()):
+        if oldrow['place']==place and oldrow['hash']==h:
+            bound=st['sources'].get(oldrow['id'])
+            if bound: st['sources'][item_id(place,newh,oldrow['season'])]=bound
+            del st['watches'][oldrow['id']]
+    st['sources'][item_id(place,newh,season)]=w['source']
     save(st)
+    return dict(message='Раздача обновлена',hash=newh,ready=w['ready'])
 
 def main():
     os.umask(0o077)
-    with (ROOT/'worker.lock').open('a') as lock:
-        try: fcntl.flock(lock,fcntl.LOCK_EX if sys.argv[1:] == ['scan'] else fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError: raise Unavailable('Идёт проверка сезонов. Попробуйте немного позже')
-        p,st=Providers(),state()
-        if sys.argv[1:] == ['scan']:
-            scan(p,st)
-            save(st)
-            print(json.dumps(dict(inventory=st['totals'],seasons=len(st['watches']),checked=st['checked'])))
-        elif len(sys.argv)==5:
-            action(p,st,*sys.argv[1:])
-        else:
-            raise Unavailable('Некорректная команда')
+    args=sys.argv[1:]
+    p=Providers()
+    if args==['catalog']:
+        result=catalog(p,state())
+    elif len(args)==3 and args[0]=='media':
+        result=media(p,*args[1:])
+    else:
+        with (ROOT/'worker.lock').open('a') as lock:
+            try: fcntl.flock(lock,fcntl.LOCK_EX if args==['scan'] else fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError: raise Unavailable('Идёт проверка раздач. Повторите через минуту')
+            st=state()
+            if args==['scan']:
+                scan(p,st)
+                save(st)
+                result=dict(inventory=st['totals'],seasons=len(st['watches']))
+            elif len(args)==5 and args[0]=='update':
+                result=update_release(p,st,args[1],args[2],int(args[3]),args[4])
+            else: raise Unavailable('Некорректная команда')
+    print(json.dumps(result,ensure_ascii=False,separators=(',',':')))
 if __name__=='__main__':
     try: main()
     except ERRORS as exc:

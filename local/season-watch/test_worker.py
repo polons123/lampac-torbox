@@ -13,7 +13,7 @@ P='1'*64
 def file(n, size=None, suffix='1080p'):
     return dict(name=f'Show.S02E{n:02d}.{suffix}.WEB-DL.mkv',size=size or n*200)
 def jac(h):
-    return dict(hash=h,page=P,label='Show Season 2 1080p',height=1080,audio=['studio'],voices=['Studio'],seasons=[2],tracker='tracker.test')
+    return dict(hash=h,page=P,label='Show Season 2 1080p',height=1080,title='Show',original='Show',audio=['studio'],voices=['Studio'],seasons=[2],tracker='tracker.test')
 def torrent(h,fs):
     return dict(hash=h,title='Show',original='Show',label='Show Season 2 1080p',files=fs,tmdb=19,tv=True,movie=False,raw={'data':'{}','download_present':True})
 class Sources:
@@ -29,7 +29,7 @@ class Sources:
     def calendar(self,path,**kw):
         if '/season/' not in path:return {'name':'Show','original_name':'Show'}
         return {'episodes':[dict(episode_number=i,air_date='2020-01-01') for i in range(1,4)]}
-    def jac(self,*args): return self.rows
+    def jac(self,*args,**kwargs): return self.rows
     def candidate_files(self,place,h):return self.candidate
     def ts(self,place,op,**kw):
         assert op=='set' and kw['hash']==B
@@ -53,39 +53,42 @@ class Tests(unittest.TestCase):
         w.scan(self.p,self.s);w.save(self.s)
     def get(self,place='peer'):
         return self.s['watches'][w.item_id(place,A,2)]
-    def test_change_and_apply(self):
-        self.scan();self.assertEqual(self.get()['waiting'],[3])
-        self.p.rows=[jac(B)];self.scan();row=self.get()
-        self.assertEqual(row['ready'],[3]);self.assertEqual(self.p.writes,[])
-        w.action(self.p,self.s,'apply',row['id'],w.revision(row),'')
-        self.assertEqual(self.p.writes,[('peer',B)]);self.assertEqual(len(self.p.inventory('peer')),2)
-        with self.assertRaises(Unavailable):w.action(self.p,self.s,'apply',row['id'],w.revision(row),'')
-        self.scan();self.assertNotIn(row['id'],self.s['watches'])
-    def test_box_cache_only(self):
-        self.scan();self.p.rows=[jac(B)];self.scan();row=self.get('box')
-        w.action(self.p,self.s,'apply',row['id'],w.revision(row),'');self.assertEqual(self.p.writes,[('box',B)])
-    def test_stale_or_ambiguous(self):
-        self.scan();self.p.rows=[jac(B)];self.scan();row=self.get()
-        self.p.rows=[jac(B),jac(C)]
-        with self.assertRaises(Unavailable):w.action(self.p,self.s,'apply',row['id'],w.revision(row),'')
-        self.assertFalse(self.p.writes)
-    def test_manual_source(self):
-        self.p.rows=[jac(B)];self.scan();row=self.get()
-        self.assertEqual(row['ready'],[]);self.assertEqual(len(row['choices']),1)
-        w.action(self.p,self.s,'bind',row['id'],w.revision(row),P)
-        self.assertEqual(self.get()['ready'],[3]);self.assertFalse(self.p.writes)
-    def test_provider_outage(self):
-        self.scan();self.p.box_down=True;self.p.rows=[jac(B)];self.scan()
-        self.assertEqual(self.get('peer')['ready'],[3]);self.assertEqual(self.get('box')['ready'],[])
-        self.assertIn('error',self.s['checked']['box'])
-    def test_files_tracks_and_quality(self):
+    def test_card_update_and_archive(self):
         self.scan();self.p.rows=[jac(B)]
-        for prop,bad in [('height',720),('voices',[]),('audio',[])]:
-            self.p.rows=[{**jac(B),prop:bad}];self.scan();self.assertFalse(self.get()['ready'])
-        self.p.rows=[jac(B)];self.p.candidate=[file(1,999),file(2),file(3)];self.scan();self.assertFalse(self.get()['ready'])
-        self.p.candidate=[file(2),file(3)];self.scan();self.assertFalse(self.get()['ready'])
-    def test_parser(self):
-        rows=episode_files([dict(name='[099] Supernatural S05E17 - 99 Problems.mkv',size=2),dict(name='Sample.S05E18.mkv',size=3)])
-        self.assertEqual(list(rows[5]),['17'])
-        self.assertEqual(w.file_signature('Show.S01E01.1080.WEB.mkv'),w.file_signature('Show.S01E02.1080p.WEB.mkv'))
+        self.p.candidate=[dict(name='New.S02E03.mkv',size=96),file(1,9999)]
+        self.p.rows[0].update(audio=[],voices=['Other'])
+        result=w.update_release(self.p,self.s,'peer',A,0)
+        self.assertEqual(result['ready'],[3]);self.assertEqual(self.p.writes,[('peer',B)])
+        self.assertEqual(len(self.p.inventory('peer')),2)
+        self.assertEqual([c['hash'] for c in w.catalog(self.p,self.s)['cards'] if c['place']=='peer'],[B])
+        w.update_release(self.p,self.s,'peer',A,0);self.assertEqual(len(self.p.writes),1)
+    def test_no_new_episode(self):
+        self.scan();self.p.rows=[jac(B)];self.p.candidate=[file(2,777)]
+        self.assertIn('Новых',w.update_release(self.p,self.s,'peer',A,0)['message'])
+        self.assertFalse(self.p.writes)
+    def test_box_cache_and_outage(self):
+        self.scan();self.p.rows=[jac(B)]
+        w.update_release(self.p,self.s,'box',A,0);self.assertEqual(self.p.writes,[('box',B)])
+        self.p.box_down=True
+        catalog=w.catalog(self.p,self.s);self.assertIn('box',catalog['errors'])
+        self.assertTrue(any(c['place']=='peer' for c in catalog['cards']))
+    def test_ambiguous_then_selected(self):
+        self.p.rows=[jac(B),{**jac(C),'page':'2'*64}]
+        res=w.update_release(self.p,self.s,'peer',A,0)
+        self.assertEqual(len(res['choices']),2);self.assertFalse(self.p.writes)
+        with self.assertRaises(Unavailable):w.update_release(self.p,self.s,'peer',A,0,'f'*64)
+        w.update_release(self.p,self.s,'peer',A,0,res['choices'][0]['value'])
+        self.assertEqual(self.p.writes,[('peer',B)])
+    def test_movie_and_different_sources(self):
+        self.p.items['home'][0].update(movie=True,tv=False,files=[{'id':1,'name':'movie.mkv','size':60}])
+        self.scan()
+        cards=w.catalog(self.p,self.s)['cards'];self.assertEqual(len(cards),3)
+        self.assertTrue(next(c for c in cards if c['place']=='home')['movie'])
+        self.assertIn('актуальна',w.update_release(self.p,self.s,'home',A,0)['message'])
+        self.p.rows=[jac(B)];w.update_release(self.p,self.s,'home',A,0)
+        self.assertEqual(self.p.writes,[('home',B)])
+    def test_destination_must_have_new_episode(self):
+        self.scan();self.p.rows=[jac(B)];self.p.ts_files=lambda *args,**kwargs:[file(1)]
+        with self.assertRaises(Unavailable):w.update_release(self.p,self.s,'peer',A,0)
+        self.assertFalse(self.p.writes)
 if __name__=='__main__':unittest.main()

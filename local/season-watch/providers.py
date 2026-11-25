@@ -83,7 +83,8 @@ def unpack_ts(item):
     movie = not tv and bool(m.get('release_date') or m.get('media_type') == 'movie')
     title = m.get('name') or m.get('title') or ''
     return {'hash': item['hash'].lower(), 'label': item.get('title') or title, 'tv': tv,
-            'movie': movie, 'tmdb': m.get('id') if tv else None, 'title': title,
+            'movie': movie, 'tmdb': m.get('id'), 'title': title, 'poster':m.get('poster_path') or item.get('poster') or '',
+            'year':str(m.get('first_air_date') or m.get('release_date') or '')[:4],
             'original': m.get('original_name') or m.get('original_title') or title,
             'files': item.get('file_stats') or [], 'raw': item}
 
@@ -145,7 +146,7 @@ class Providers:
                 m = metas[0] if metas and len({(v.get('tmdb_id'),v.get('media_type')) for v in metas}) == 1 else {}
                 items.append(dict(hash=h, label=t['name'], title=m.get('title') or '', original=m.get('original_title') or '',
                                   tmdb=m.get('tmdb_id'), tv=m.get('media_type')=='tv', movie=m.get('media_type')=='movie',
-                                  files=t.get('files') or [], raw=t))
+                                  files=t.get('files') or [], raw=t, poster=m.get('poster_path') or '', year=str(m.get('year') or '')))
             if len(batch) < 100:
                 return items
             offset += len(batch)
@@ -157,13 +158,13 @@ class Providers:
                 dict(api_key=self.cfg['tmdb'], language='ru-RU', **params)))
         return self.memo[key]
 
-    def jac(self, title, original):
-        key = ('jac',title,original)
+    def jac(self, title, original, movie=False, year=0):
+        key = ('jac',title,original,movie,year)
         if key in self.memo:
             return self.memo[key]
         c = self.cfg['jacred']
         data = http(c['base_url'].rstrip('/') + '/api/v2.0/indexers/all/results?' + parse.urlencode(
-            dict(title=title,title_original=original or title,year=0,is_serial=2,apikey=c['api_key'])))
+            dict(title=title,title_original=original or title,year=year,is_serial=1 if movie else 2,apikey=c['api_key'])))
         if not isinstance(data.get('Results'), list):
             raise Unavailable('Некорректный ответ JacRed')
         out = []
@@ -180,10 +181,8 @@ class Providers:
             info = row.get('info') or {}
             streams = row.get('ffprobe') or []
             height = max([int(s.get('height') or 0) for s in streams if s.get('codec_type')=='video'] or [0])
-            audio = sorted({str((s.get('tags') or {}).get('title') or '').strip().casefold()
-                            for s in streams if s.get('codec_type')=='audio'} - {''})
             out.append(dict(hash=m.group(1).lower(), page=page, tracker=u.hostname, label=row.get('Title') or '',
-                seasons=info.get('seasons') or [], height=height, audio=audio, voices=sorted(info.get('voices') or [])))
+                seasons=info.get('seasons') or [], height=height, title=info.get('name') or '', original=info.get('originalname') or ''))
         self.memo[key]=out
         return out
 

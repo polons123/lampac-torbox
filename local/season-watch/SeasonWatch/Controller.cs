@@ -14,7 +14,7 @@ namespace SeasonWatch;
 public class SeasonWatchController : BaseController
 {
     const string report = "/var/lib/season-watch/report.json";
-    static readonly SemaphoreSlim gate = new(1,1);
+    static readonly SemaphoreSlim gate = new(4,4);
 
     bool Allowed() {
         var uid = requestInfo?.user_uid;
@@ -40,37 +40,47 @@ public class SeasonWatchController : BaseController
         } catch (IOException) { return Error(503,"Результат проверки пока недоступен"); }
     }
     public class Input {
-        public string op {get;set;}
-        public string id {get;set;}
-        public string revision {get;set;}
-        public string value {get;set;}
+        public string place {get;set;}
+        public string hash {get;set;}
+        public int season {get;set;}
+        public string choice {get;set;}
     }
-    [HttpPost,Route("season-watch/action"),RequestSizeLimit(1024)]
-    public async Task<ActionResult> Change([FromBody] Input input) {
+    static bool Valid(string place,string hash) =>
+        (place=="home" || place=="peer" || place=="box") && Regex.IsMatch(hash??"", @"\A[a-f0-9]{40}\z");
+
+    [HttpGet, Route("season-watch/catalog")]
+    public Task<ActionResult> Catalog() => Run("catalog");
+
+    [HttpGet, Route("season-watch/media")]
+    public Task<ActionResult> Media(string place,string hash) =>
+        Valid(place,hash) ? Run("media",place,hash) : Task.FromResult(Error(400,"Некорректная раздача"));
+
+    [HttpPost, Route("season-watch/update"), RequestSizeLimit(1024)]
+    public Task<ActionResult> Update([FromBody] Input input) {
+        if (Request.Headers["X-Season-Watch"]!="1" || input==null || !Valid(input.place,input.hash) ||
+            input.season<0 || input.season>999 || !string.IsNullOrEmpty(input.choice) && !Regex.IsMatch(input.choice,@"\A[a-f0-9]{64}\z"))
+            return Task.FromResult(Error(400,"Некорректный выбор"));
+        return Run("update",input.place,input.hash,input.season.ToString(),input.choice??"");
+    }
+    async Task<ActionResult> Run(params string[] args) {
         Response.Headers["Cache-Control"]="private, no-store";
         if (!Allowed()) return Error(403,"Нет доступа к библиотекам");
-        if (Request.Headers["X-Season-Watch"]!="1" || input==null ||
-            !Regex.IsMatch(input.id??"", @"\A[a-f0-9]{32}\z") || !Regex.IsMatch(input.revision??"", @"\A[a-f0-9]{32}\z") ||
-            !(input.op=="apply" && string.IsNullOrEmpty(input.value) ||
-              input.op=="bind" && Regex.IsMatch(input.value??"", @"\A[a-f0-9]{64}\z") ||
-              input.op=="identity" && Regex.IsMatch(input.value??"", @"\A[1-9][0-9]{0,9}\z")))
-            return Error(400,"Некорректный выбор");
-        if (!await gate.WaitAsync(0)) return Error(409,"Уже выполняется обновление");
+        if (!await gate.WaitAsync(TimeSpan.FromSeconds(2))) return Error(429,"Источник занят. Повторите запрос");
         try {
             var info=new ProcessStartInfo("/usr/bin/python3") { UseShellExecute=false,RedirectStandardOutput=true };
-            foreach (var arg in new[]{"/usr/local/lib/season-watch/worker.py",input.op,input.id,input.revision,input.value??""})
-                info.ArgumentList.Add(arg);
+            info.ArgumentList.Add("/usr/local/lib/season-watch/worker.py");
+            foreach (var arg in args) info.ArgumentList.Add(arg);
             using var process=Process.Start(info);
             var reading=process.StandardOutput.ReadToEndAsync();
             using var deadline=new CancellationTokenSource(TimeSpan.FromMinutes(4));
             try { await process.WaitForExitAsync(deadline.Token); }
             catch (OperationCanceledException) {
                 try { process.Kill(true); } catch (InvalidOperationException) { }
-                return Error(504,"Проверка заняла слишком много времени. Обновите список");
+                return Error(504,"Источник не успел ответить");
             }
-            string detail=(await reading).Trim();
-            if (process.ExitCode!=0) return Error(409,detail.Length>0 && detail.Length<=160 ? detail : "Не удалось обновить выбор");
-            return new JsonResult(new {success=true});
+            string output=(await reading).Trim();
+            if (process.ExitCode!=0) return Error(409,output.Length>0 && output.Length<=160 ? output : "Источник временно недоступен");
+            return Content(output,"application/json; charset=utf-8");
         } finally { gate.Release(); }
     }
 }

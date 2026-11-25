@@ -14,7 +14,10 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
     const server=http.createServer((q,r)=>{
         const route=new URL(q.url,'http://localhost').pathname;
         if(route==='/season-watch/list') {r.setHeader('Content-Type','application/json');return r.end(JSON.stringify(fixture));}
-        if(route==='/season-watch/action') {actions++;r.setHeader('Content-Type','application/json');return r.end('{"success":true}');}
+        if(route==='/season-watch/catalog') {r.setHeader('Content-Type','application/json');return r.end(JSON.stringify({cards:['peer','home','box'].map((place,i)=>({place,hash:String(i).repeat(40),title:'Test '+place,label:'1080p',poster:'',year:'2026',movie:i===1,seasons:i===1?[]:[{n:2,ready:[3],waiting:[],tmdb:3}]})),errors:{}}));}
+        if(route==='/season-watch/media') {r.setHeader('Content-Type','application/json');return r.end(JSON.stringify({files:[{id:1,name:'episode.mkv',path:'episode.mkv',url:'https://fixture.invalid/video'}],box_id:5}));}
+        if(route==='/torbox/play') {r.setHeader('Content-Type','application/json');return r.end('{"success":true,"url":"https://fixture.invalid/box"}');}
+        if(route==='/season-watch/update') {actions++;r.setHeader('Content-Type','application/json');return r.end('{"message":"Раздача обновлена","hash":"abcd"}');}
         if(route==='/lampainit.js') {r.setHeader('Content-Type','application/javascript');return r.end('');}
         const p=path.join(dir,route);
         if(!p.startsWith(dir+'/') || !fs.existsSync(p)||!fs.statSync(p).isFile()){r.statusCode=404;return r.end();}
@@ -41,25 +44,31 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
         await call('Page.addScriptToEvaluateOnNewDocument',{source:"localStorage.setItem('language',JSON.stringify('ru'));localStorage.setItem('account_email',JSON.stringify('fixture@example.invalid')); "});
         await call('Page.navigate',{url:origin+'/index.html'});
         await until("window.Lampa && (window.appready || ($('.selector').filter(function(){return $(this).text().trim()==='Русский'}).trigger('hover:enter'),false))");
-        await ev("window.testMenus=[];var actualSelect=Lampa.Select.show;Lampa.Select.show=function(o){testMenus.push(o);return actualSelect(o);};");
-        await ev(fs.readFileSync('/opt/lampac/mods/SeasonWatch/plugin.js','utf8').replace('{localhost}',origin));
-        await until("document.querySelector('[data-action=season_watch] span')?.textContent==='1'");
-        await ev("$('[data-action=season_watch]').trigger('hover:enter')");
-        await until('testMenus.length===1');
-        assert.equal(await ev('testMenus[0].title'),'Обновления сериалов');
-        assert(await ev("testMenus[0].items.some(x=>x.subtitle?.includes('S02E04 вышла'))"));
-        assert(await ev("testMenus[0].items[0].subtitle.includes('S02E03 доступна')"));
-        assert(await ev("testMenus[0].items[0].title.includes('&lt;b&gt;')"));
-        await ev('testMenus[0].onSelect(testMenus[0].items[0])');
-        assert.equal(await ev("document.querySelector('[data-action=season_watch] span').textContent"),'');
-        await ev("testMenus.at(-1).onSelect(testMenus.at(-1).items.find(x=>x.title==='Обновить раздачу'))");
+        await until("Lampa.Activity.active()?.component==='main'");
+        await delay(1800);
+        await ev("window.testMenus=[];window.notes=[];var origNoty=Lampa.Noty.show;Lampa.Noty.show=function(m){notes.push(m);return origNoty(m);};var actualSelect=Lampa.Select.show;Lampa.Select.show=function(o){testMenus.push(o);return actualSelect(o);};");
+        await ev(fs.readFileSync(path.join(__dirname,'SeasonWatch/plugin.js'),'utf8').replace('{localhost}',origin));
+        await until("document.querySelector('[data-action=all_releases] span')?.textContent==='1'");
+        await ev("window.playCalls=[];Lampa.Player.play=function(c){playCalls.push(c.url)}; Lampa.Player.playlist=function(){}");
+        await ev("$('[data-action=all_releases]').trigger('hover:enter')");
+        await until("$('.all-releases-card').length===3");
+        assert(await ev("$('.all-releases-source').text().includes('Домашний TorrServer') && $('.all-releases-source').text().includes('h2nexus-p')"));
+        const card = place => "$('.all-releases-card').filter(function(){return $(this).find('.all-releases-source').text().includes('"+place+"');})[0].dispatchEvent(new Event('hover:enter'))";
+        await ev(card('h2nexus-p'));
+        await until("testMenus.at(-1)?.items.some(x=>x.title==='Обновить')");
         assert.equal(actions,0);
-        await ev("testMenus.at(-1).onSelect(testMenus.at(-1).items.find(x=>x.title==='Отмена'))");
-        assert.equal(actions,0);
-        await ev("testMenus.at(-1).onSelect(testMenus.at(-1).items.find(x=>x.title==='Обновить раздачу')); testMenus.at(-1).onSelect(testMenus.at(-1).items.find(x=>x.title==='Обновить'))");
-        await until("testMenus.at(-1).title==='Обновления сериалов'");
+        await ev("testMenus.at(-1).onSelect(testMenus.at(-1).items.find(x=>x.title==='Смотреть'))");
+        await until("playCalls.includes('https://fixture.invalid/video')");
+        await ev(card('TorBox'));
+        await ev("testMenus.at(-1).onSelect(testMenus.at(-1).items.find(x=>x.title==='Смотреть'))");
+        await until("playCalls.includes('https://fixture.invalid/box')");
+        await ev(card('h2nexus-p'));
+        await ev("testMenus.at(-1).onSelect(testMenus.at(-1).items.find(x=>x.title==='Обновить'))");
+        await until("$('.all-releases-card').length===3");
+        for(let i=0;i<30&&!actions;i++)await delay(100);
+        if(!actions) console.log(await ev("({notes,active:Lampa.Activity.active()?.component,menus:testMenus.map(x=>x.title),urls:performance.getEntriesByType('resource').filter(x=>x.name.includes('season-watch')).map(x=>new URL(x.name).pathname)})"));
         assert.equal(actions,1);
-        console.log('PASS actual Lampa menu, ready/wait statuses, deduplicated count, read badge, HTML escaping, explicit confirmation and cancellation');
+        console.log('PASS native three-source card grid, film and series, direct TorrServer and TorBox player handoff, card update');
     } finally {
         if(ws)ws.close();chrome.kill();server.close();await delay(500);fs.rmSync(profile,{recursive:true,force:true,maxRetries:3});
     }
