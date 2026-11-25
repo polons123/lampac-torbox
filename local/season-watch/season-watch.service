@@ -1,0 +1,19 @@
+[Unit]
+Description=Check saved TV season releases
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=lampac
+Group=lampac
+ExecStart=/usr/bin/python3 -B /usr/local/lib/season-watch/worker.py scan
+Nice=10
+CPUQuota=35%
+MemoryMax=192M
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/season-watch
+TimeoutStartSec=45min

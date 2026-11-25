@@ -1,0 +1,10 @@
+[Unit]
+Description=Check season releases every six hours
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:43:00 UTC
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
