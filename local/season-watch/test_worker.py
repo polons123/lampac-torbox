@@ -64,6 +64,28 @@ class Tests(unittest.TestCase):
         w.scan(self.p,self.s);w.save(self.s)
     def get(self,place='peer'):
         return self.s['watches'][w.item_id(place,A,2)]
+    def test_infuse_metadata_and_media_sources(self):
+        self.p.cfg={'ts':{p:{'url':'https://'+p+'.invalid'} for p in ('home','peer')}}
+        for place in w.NAMES:
+            item=self.p.items[place][0]
+            item.update(original='Original',year='2026',files=[dict(file(8),id=0),dict(name='cover.jpg',id=3)])
+            result=w.media(self.p,place,A)
+            self.assertEqual(result['movie']['original_name'],'Original')
+            self.assertEqual(result['movie']['first_air_date'],'2026-01-01')
+            self.assertEqual(len(result['files']),1)
+            f=result['files'][0]
+            self.assertEqual((f['season'],f['episode'],f['id']),(2,8,0))
+            if place=='box':
+                self.assertEqual(result['box_id'],11)
+                self.assertNotIn('url',f)
+            else:
+                self.assertEqual(f['url'],'https://'+place+'.invalid/stream/'+f['name']+'?link='+A+'&index=0&play')
+        item=self.p.items['home'][0]
+        item.update(movie=True,tv=False)
+        result=w.media(self.p,'home',A)
+        self.assertEqual(result['movie']['id'],19)
+        self.assertEqual(result['movie']['release_date'],'2026-01-01')
+        self.assertNotIn('episode',result['files'][0])
     def test_card_update_and_archive(self):
         self.scan();self.p.rows=[jac(B)]
         self.p.candidate=[dict(name='New.S02E03.mkv',size=96),file(1,9999)]

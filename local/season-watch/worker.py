@@ -331,15 +331,27 @@ def media(p,place,h):
         raise Unavailable('Раздача ещё загружается в TorBox')
     files=t['files'] or (p.ts_files(place,h) if place!='box' else [])
     rows=[]
+    hint=season_hint(t['label'])
     for f in files:
         name=f.get('path') or f.get('name') or ''
         if not VIDEO.search(name) or f.get('id') is None: continue
         idx=int(f['id'])
         row=dict(name=name.rsplit('/',1)[-1],path=name,id=idx)
+        if not t['movie']:
+            for season,episodes in episode_files([f],hint).items():
+                row.update(season=season,episode=int(next(iter(episodes))))
         if place!='box':
             row['url']=p.cfg['ts'][place]['url']+'/stream/'+quote(row['name'],safe='')+'?link='+h+'&index='+str(idx)+'&play'
         rows.append(row)
-    return dict(files=rows,box_id=t['raw'].get('id') if place=='box' else None)
+    series=t['tv'] or any('episode' in row for row in rows)
+    movie=None
+    if series or t['movie']:
+        title=t['title'] or display_name(t)
+        movie=dict(title=title,original_title=t.get('original') or title,id=t.get('tmdb'))
+        date=t['year']+'-01-01' if t.get('year') else ''
+        if series: movie.update(media_type='tv',name=title,original_name=movie['original_title'],first_air_date=date)
+        else: movie.update(media_type='movie',release_date=date)
+    return dict(files=rows,movie=movie,box_id=t['raw'].get('id') if place=='box' else None)
 
 def movie_offer(p,st,t,w,selection):
     rows=p.jac(w['title'],t['original'],movie=True,year=int(t.get('year') or 0))

@@ -27,7 +27,8 @@
                 if (fail) fail((xhr.responseJSON||{}).detail || 'Источник временно недоступен');
             });
         }
-        if (path==='torbox/play' && window.lampac_torbox_headers) window.lampac_torbox_headers(address,send);
+        if (path==='torbox/infuse/links') send({'X-TorBox-Mode':'file'});
+        else if (path==='torbox/play' && window.lampac_torbox_headers) window.lampac_torbox_headers(address,send);
         else send(body?{'X-Season-Watch':'1'}:{});
     }
     function message(txt) { Lampa.Noty.show(safe(txt)); }
@@ -72,11 +73,16 @@
                 } else back();
             },error);
         }
-        function play(c) {
+        function withMedia(c,ready) {
             request('season-watch/media?place='+encodeURIComponent(c.place)+'&hash='+c.hash,null,function (r) {
                 if (!current()) return;
                 var files=(r.files||[]).sort(function (a,b) {return a.path.localeCompare(b.path,undefined,{numeric:true});});
                 if (!files.length) return error('В раздаче нет видеофайлов');
+                ready(files,r);
+            },error);
+        }
+        function play(c) {
+            withMedia(c,function (files,r) {
                 function launch(f) {
                     function open(address) {
                         if (!current()) return;
@@ -93,7 +99,60 @@
                 }
                 if (files.length===1) return launch(files[0]);
                 select('Выберите файл',files.map(function (f) {return {title:safe(f.name),subtitle:safe(f.path!==f.name?f.path.slice(0,-f.name.length):''),run:function () {launch(f);}};}),back);
-            },error);
+            });
+        }
+        var infuseVisit=0;
+        function infuse(c) {
+            var visit=++infuseVisit;
+            function active() {return visit===infuseVisit && current();}
+            function close() {++infuseVisit;if (current()) actions(c);}
+            withMedia(c,function (files,r) {
+                if (!active()) return;
+                if (c.place==='box' && (r.box_id==null || c.box_id!==r.box_id)) return error('Карточка TorBox изменилась. Обновите список раздач');
+                function resolve(wanted,done) {
+                    if (!active()) return;
+                    if (c.place!=='box') return done();
+                    message('Подготавливаю ссылки TorBox для Infuse');
+                    function batch(offset) {
+                        if (!active()) return;
+                        var chunk=wanted.slice(offset,offset+8);
+                        if (!chunk.length) return done();
+                        request('torbox/infuse/links',{id:r.box_id,files:chunk.map(function (f) {return f.id;})},function (reply) {
+                            if (!active()) return;
+                            var links=Array.isArray(reply.data)?reply.data:[];
+                            var complete=chunk.every(function (f) {
+                                var match=links.find(function (l) {return l.id===f.id;});
+                                if (!match || !/^https:\/\//i.test(match.url||'')) return false;
+                                f.url=match.url;
+                                if (match.episode>0 && match.season!=null) {f.season=match.season;f.episode=match.episode;}
+                                return true;
+                            });
+                            if (!complete) return error(reply.detail||'TorBox не вернул ссылки для всех выбранных файлов');
+                            batch(offset+chunk.length);
+                        },function (s) {if (active()) error(s);});
+                    }
+                    batch(0);
+                }
+                function chooseFile() {
+                    if (!active()) return;
+                    var saver=window.lampac_infuse_saver;
+                    if (!saver || !saver.menu) return error('Не удалось загрузить InfuseSaver');
+                    function modes(file,all) {
+                        if (!active()) return;
+                        var menu=saver.menu({element:file,items:files,params:{movie:r.movie},resolve:resolve});
+                        if (all) menu=menu.filter(function (item) {return item.infuse_scope!=='single';});
+                        select('Infuse · '+(all?c.title:file.name),menu.map(function (item) {
+                            return {title:item.title,run:function () {if (active()) {back();item.onSelect();}}};
+                        }),files.length===1?close:chooseFile);
+                    }
+                    if (files.length===1) return modes(files[0],false);
+                    var rows=[{title:'Все видеофайлы',run:function () {modes(files[0],true);}}];
+                    files.forEach(function (f) {rows.push({title:safe(f.name),subtitle:safe(f.path!==f.name?f.path:''),run:function () {modes(f,false);}});});
+                    select('Infuse · '+c.title,rows,close);
+                }
+                if (window.lampac_infuse_saver && window.lampac_infuse_saver.menu) chooseFile();
+                else Lampa.Utils.putScriptAsync([url('infuseSave.js')],chooseFile,function () {if(active()) error('Не удалось загрузить InfuseSaver');});
+            });
         }
         function reload() {
             if (current()) Lampa.Activity.replace({component:'all_releases',title:title,page:1});
@@ -135,11 +194,13 @@
             ],function () {if (current()) actions(c);});
         }
         function actions(c) {
+            ++infuseVisit;
             var read=Lampa.Storage.get(seenKey(),{})||{};
             (c.seasons||[]).forEach(function (s) {s.ready.forEach(function (n) {
                 read[eventKey({tmdb:s.tmdb,id:s.id,season:s.n},n)]=true;
             });}); Lampa.Storage.set(seenKey(),read);drawBadge();
             var rows=[{title:'Смотреть',subtitle:safe(c.label),run:function () {play(c);}},
+                {title:'Сохранить в Infuse',subtitle:names[c.place],run:function () {infuse(c);}},
                 {title:'Обновить',subtitle:names[c.place]+' · после успешного обновления прежние версии будут удалены',run:function () {edit(c,0,'');}}];
             if(c.place==='box') rows.push({title:'Управление TorBox',run:function () {
                 Lampa.Activity.push({component:'my_torbox',title:'Мой TorBox',page:1});
