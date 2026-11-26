@@ -55,6 +55,61 @@ public partial class TorBoxController
         }
     }
 
+    sealed record SearchResult(JArray Rows, (string Title,string Original,int Year) Matched, bool Cacheable);
+    sealed class SearchFlight {
+        public readonly CancellationTokenSource Lifetime = new();
+        public readonly TaskCompletionSource<SearchResult> Done = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int Waiters;
+    }
+    static readonly Dictionary<string,SearchFlight> searches = new();
+
+    static async Task<SearchResult> FindSearch(string key,Func<CancellationToken,Task<SearchResult>> load,CancellationToken caller) {
+        caller.ThrowIfCancellationRequested();
+        SearchFlight flight;
+        bool start=false;
+        lock(searchCacheGate) {
+            if(searchCache.TryGetValue(key,out var hit) && hit.Expires>DateTime.UtcNow)
+                return new SearchResult(hit.Rows,hit.Matched,true);
+            if(!searches.TryGetValue(key,out flight)) {
+                if(searches.Count>=256)throw new TorBoxException(503,"Много одновременных поисков. Попробуйте позже");
+                searches[key]=flight=new SearchFlight();
+                start=true;
+            }
+            flight.Waiters++;
+        }
+        if(start)_=Complete();
+        try { return await flight.Done.Task.WaitAsync(caller); }
+        finally {
+            lock(searchCacheGate) {
+                if(--flight.Waiters==0 && !flight.Done.Task.IsCompleted) {
+                    searches.Remove(key);
+                    flight.Lifetime.Cancel();
+                }
+            }
+        }
+
+        async Task Complete() {
+            try {
+                var found=await load(flight.Lifetime.Token);
+                lock(searchCacheGate) {
+                    if(flight.Waiters>0 && found.Cacheable)StoreSearch(key,found.Rows,found.Matched);
+                    flight.Done.TrySetResult(found);
+                }
+            }
+            catch(OperationCanceledException) { flight.Done.TrySetCanceled(); }
+            catch(Exception ex) {
+                flight.Done.TrySetException(ex);
+                _=flight.Done.Task.Exception; // All waiters may already have left.
+            }
+            finally {
+                lock(searchCacheGate) {
+                    if(searches.TryGetValue(key,out var current) && current==flight)searches.Remove(key);
+                    flight.Lifetime.Dispose();
+                }
+            }
+        }
+    }
+
     ActionResult Similar(SimilarTpl t, params (int Season,int Episode)?[] frames) {
         string html=t.ToHtml();
         if(frames.Length>0){
@@ -154,34 +209,32 @@ public partial class TorBoxController
     }
 
     [HttpGet, Route("lite/torbox")]
-    public Task<ActionResult> Online(string title, string original_title, int year=0, byte serial=0, bool rjson=true, long id=0, long tmdb_id=0, string source=null, string tb_voice=null, int tb_season=0, int tb_episode=0, string tb_res=null, string tb_hdr=null, string tb_codec=null, string tb_size=null, string imdb_id=null, long kinopoisk_id=0, int clarification=0, bool tb_possible=false) => Guard(async(c,key)=>{
+    public Task<ActionResult> Online(string title, string original_title, int year=0, byte serial=0, bool rjson=true, long id=0, long tmdb_id=0, string source=null, string tb_voice=null, int tb_season=0, int tb_episode=0, string tb_res=null, string tb_hdr=null, string tb_codec=null, string tb_size=null, string imdb_id=null, long kinopoisk_id=0, int clarification=0, bool tb_possible=false, string tb_order=null, string tb_prefer_format=null, string tb_prefer_voice=null) => Guard(async(c,key)=>{
         if(string.IsNullOrWhiteSpace(title) && string.IsNullOrWhiteSpace(original_title))return Error(400,"Не указано название фильма");
         if(tb_season<0 || tb_season>99 || tb_episode<0 || tb_episode>999 ||
             (tb_season==0)!=(tb_episode==0) || (serial!=1 && tb_season>0))return Error(400,"Некорректный сезон или серия");
         long tmdb=tmdb_id>0 ? tmdb_id : (source is "tmdb" or "cub" ? id : 0);
         string retryKey=KinoApi.Enabled && clarification==0 ? $":{tmdb}:{imdb_id}:{kinopoisk_id}" : "";
         string searchKey=SeriesKeyHash(metadataOwner+":"+c["jacred"]?.ToString(Newtonsoft.Json.Formatting.None))+":"+Normalize(title)+":"+Normalize(original_title)+":"+year+":"+serial+":"+tb_possible+retryKey;
-        JArray rows;
-        var matched=(Title:title,Original:original_title,Year:year);
-        if(searchCache.TryGetValue(searchKey,out var hit) && hit.Expires>DateTime.UtcNow) {
-            rows=hit.Rows;
-            matched=hit.Matched;
-        }
-        else {
+        // The shared loader captures only validated settings and its own cancellation token.
+        var parserClient=ParserClient;
+        async Task<SearchResult> Fetch(CancellationToken token) {
+            var matched=(Title:title,Original:original_title,Year:year);
+            bool cacheable=true;
             var parser=c["jacred"] as JObject;
-            if(parser==null || !Uri.TryCreate((string)parser["base_url"],UriKind.Absolute,out var baseUri))return Error(503,"JacRed для TorBox не настроен");
+            if(parser==null || !Uri.TryCreate((string)parser["base_url"],UriKind.Absolute,out var baseUri))throw new TorBoxException(503,"JacRed для TorBox не настроен");
             string SearchUrl(string preferred,string original,int releaseYear) =>
                 baseUri.ToString().TrimEnd('/')+"/api/v2.0/indexers/all/results?title="+Uri.EscapeDataString(preferred??original??"")+"&title_original="+Uri.EscapeDataString(original??preferred??"")+"&year="+releaseYear+"&is_serial="+(serial==1?2:1)+"&apikey="+Uri.EscapeDataString((string)parser["api_key"]??"");
-            using var response=await ParserClient.GetAsync(SearchUrl(title,original_title,tb_possible?0:year),HttpContext.RequestAborted);
-            if(!response.IsSuccessStatusCode)return Error(502,"JacRed не ответил на поиск");
-            var parsed=JObject.Parse(await response.Content.ReadAsStringAsync());
-            if(parsed["Results"] is not JArray results)return Error(502,"JacRed вернул некорректный список раздач");
-            rows=results;
+            using var response=await parserClient.GetAsync(SearchUrl(title,original_title,tb_possible?0:year),token);
+            if(!response.IsSuccessStatusCode)throw new TorBoxException(502,"JacRed не ответил на поиск");
+            var parsed=JObject.Parse(await response.Content.ReadAsStringAsync(token));
+            if(parsed["Results"] is not JArray results)throw new TorBoxException(502,"JacRed вернул некорректный список раздач");
+            var rows=results;
             if(!tb_possible && rows.Count==0 && clarification==0 && await KinoApi.Alternative(tmdb,imdb_id,kinopoisk_id,serial==1,title,original_title,year) is { } retry) {
-                using var timeout=CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
+                using var timeout=CancellationTokenSource.CreateLinkedTokenSource(token);
                 timeout.CancelAfter(TimeSpan.FromSeconds(2));
                 try {
-                    using var second=await ParserClient.GetAsync(SearchUrl(retry.Title,retry.Original,retry.Year),timeout.Token);
+                    using var second=await parserClient.GetAsync(SearchUrl(retry.Title,retry.Original,retry.Year),timeout.Token);
                     if(second.IsSuccessStatusCode && JObject.Parse(await second.Content.ReadAsStringAsync(timeout.Token))["Results"] is JArray found) {
                         rows=found;
                         matched=retry;
@@ -191,24 +244,27 @@ public partial class TorBoxController
             }
             if(tb_possible) {
                 // A broader index query is made only inside the explicitly opened manual group.
-                using var timeout=CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
+                using var timeout=CancellationTokenSource.CreateLinkedTokenSource(token);
                 timeout.CancelAfter(TimeSpan.FromSeconds(4));
                 async Task<JArray> WideSearch(string term) {
                     var url=baseUri.ToString().TrimEnd('/')+"/api/v2.0/indexers/all/results?query="+Uri.EscapeDataString(term)+"&is_serial="+(serial==1?2:1)+"&apikey="+Uri.EscapeDataString((string)parser["api_key"]??"");
                     try {
-                        using var wider=await ParserClient.GetAsync(url,timeout.Token);
+                        using var wider=await parserClient.GetAsync(url,timeout.Token);
                         if(wider.IsSuccessStatusCode)return JObject.Parse(await wider.Content.ReadAsStringAsync(timeout.Token))["Results"] as JArray;
-                    } catch(Exception ex) when(!HttpContext.RequestAborted.IsCancellationRequested && (ex is HttpRequestException or OperationCanceledException or Newtonsoft.Json.JsonException)) { }
+                    } catch(Exception ex) when(!token.IsCancellationRequested && (ex is HttpRequestException or OperationCanceledException or Newtonsoft.Json.JsonException)) { }
                     return null;
                 }
                 var terms=new[]{title,original_title}.Select(WideTerm).Where(term=>term!=null).Distinct();
                 var batches=await Task.WhenAll(terms.Select(WideSearch));
                 foreach(var hits in batches.Where(batch=>batch!=null))
                     foreach(var row in hits)rows.Add(row.DeepClone());
-                if(batches.All(batch=>batch!=null))StoreSearch(searchKey,rows,matched);
+                cacheable=batches.All(batch=>batch!=null);
             }
-            else StoreSearch(searchKey,rows,matched);
+            return new SearchResult(rows,matched,cacheable);
         }
+        var result=await FindSearch(searchKey,Fetch,HttpContext.RequestAborted);
+        var rows=result.Rows;
+        var matched=result.Matched;
         bool Confirmed(JObject t) =>
             (TitleMatches((string)t["Title"],matched.Title) || TitleMatches((string)t["Title"],matched.Original)) &&
             ReleaseYearAllowed(t,matched.Title,matched.Original,matched.Year,serial==1);
@@ -260,12 +316,26 @@ public partial class TorBoxController
         bool enoughHd=matching.Count(CachedHd)>=2;
         int? CandidateYear(JObject row) => CandidateYears(row,matched.Title,matched.Original)
             .OrderBy(y=>Math.Abs((long)y-matched.Year)).Cast<int?>().FirstOrDefault();
-        var candidates=matching.Where(t=>episodeMatches.Count==0 || EpisodeRank(t)>=0)
+        if((tb_prefer_voice?.Length??0)>160 || (tb_prefer_format?.Length??0)>64 ||
+            !string.IsNullOrEmpty(tb_order) && tb_order is not ("ready" or "format" or "voice"))
+            return Error(400,"Некорректные предпочтения сортировки");
+        bool Ready(JObject t) => states.TryGetValue(ReleaseHash(t)??"",out var cached) && cached==true;
+        bool PreferredVoice(JObject t) => !string.IsNullOrEmpty(tb_prefer_voice) && ReleaseVoices(t).Contains(tb_prefer_voice,StringComparer.OrdinalIgnoreCase);
+        var formatParts=(tb_prefer_format??"").Split(':',2);
+        bool PreferredFormat(JObject t) => formatParts.Length==2 && formatParts[0] is ("res" or "hdr" or "codec") &&
+            ReleaseTrait(t,formatParts[0])==formatParts[1];
+        var ranked=matching.Where(t=>episodeMatches.Count==0 || EpisodeRank(t)>=0)
             .OrderByDescending(EpisodeRank)
-            .ThenBy(t=>tb_possible && serial!=1 && year>0 ? Math.Abs((long)(CandidateYear(t)??int.MaxValue)-year) : 0)
-            .ThenBy(t=>enoughHd && Resolution(t) is >0 and <720)
-            .ThenByDescending(t=>states.TryGetValue(ReleaseHash(t)??"",out var cached) && cached==true)
-            .ThenByDescending(Resolution).ThenByDescending(t=>(int?)t["Seeders"]??0).Take(serial==1?96:12).ToArray();
+            .ThenBy(t=>tb_possible && serial!=1 && year>0 ? Math.Abs((long)(CandidateYear(t)??int.MaxValue)-year) : 0);
+        if(!string.IsNullOrEmpty(tb_order)) {
+            ranked=tb_order switch {
+                "voice"=>ranked.ThenByDescending(PreferredVoice).ThenByDescending(Ready).ThenByDescending(PreferredFormat),
+                "format"=>ranked.ThenByDescending(PreferredFormat).ThenByDescending(Ready).ThenByDescending(PreferredVoice),
+                _=>ranked.ThenByDescending(Ready).ThenByDescending(PreferredFormat).ThenByDescending(PreferredVoice)
+            };
+        }
+        var candidates=ranked.ThenBy(t=>enoughHd && Resolution(t) is >0 and <720)
+            .ThenByDescending(Ready).ThenByDescending(Resolution).ThenByDescending(t=>(int?)t["Seeders"]??0).Take(serial==1?96:12).ToArray();
         var seasons=releases.SelectMany(t=>t["info"]?["releaseTags"]?["seasons"] is JArray {Count:>0} seasonsFound ? seasonsFound.Values<int>() : new[]{SeasonHint((string)t["Title"])}).Where(s=>s>0).Distinct().OrderBy(s=>s).ToArray();
         if(candidates.Length==0) {
             var empty=new SimilarTpl();empty.Append(tb_possible?"Возможных совпадений по этим фильтрам нет.":releases.Length==0?"Точных совпадений нет. Возможные совпадения доступны в фильтре.":"По выбранным фильтрам раздач нет. Измените фильтры или выберите «Все».",null,null,search);
@@ -768,8 +838,7 @@ public partial class TorBoxController
         using var request=new HttpRequestMessage(HttpMethod.Post,api+"createtorrent");
         request.Headers.Authorization=new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer",key);
         request.Headers.UserAgent.ParseAdd("Lampac-TorBox/1.0");request.Content=form;
-        using var response=await client.SendAsync(request,HttpContext.RequestAborted);
-        if((int)response.StatusCode==429)throw new TorBoxException(429,"TorBox ограничил частоту запросов. Попробуйте позже");
+        using var response=await SendTorBox(request,key,HttpContext.RequestAborted);
         JObject result;
         try { result=JObject.Parse(await response.Content.ReadAsStringAsync()); }
         catch { throw new TorBoxException(502,"TorBox не подтвердил наличие готового кэша. Загрузка не запускалась"); }

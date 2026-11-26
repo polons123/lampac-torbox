@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Caching.Memory;
 using Newtonsoft.Json.Linq;
 using Shared;
 using System;
@@ -144,10 +145,41 @@ public partial class TorBoxController : BaseController
             metadataOwner=CredentialOwner(key);
             return await work(c, key);
         }
-        catch (TorBoxException ex) { return Error(ex.Status, ex.Message); }
+        catch (TorBoxException ex) { return TorBoxError(ex); }
         catch (TaskCanceledException) { return Error(504, "TorBox не ответил вовремя. Обновите список перед повторным добавлением"); }
         catch (HttpRequestException) { return Error(502, "Не удалось связаться с TorBox"); }
         catch { return Error(502, "Не удалось обработать ответ TorBox"); }
+    }
+
+    static readonly MemoryCache rateWindows = new(new MemoryCacheOptions { SizeLimit = 2048 });
+
+    static TorBoxException RateError(DateTimeOffset until) {
+        int seconds=(int)Math.Clamp(Math.Ceiling((until-DateTimeOffset.UtcNow).TotalSeconds),1,int.MaxValue);
+        return new TorBoxException(429,$"TorBox разрешит повтор через {seconds} с") { RetrySeconds=seconds };
+    }
+    ActionResult TorBoxError(TorBoxException error) {
+        if(error.RetrySeconds>0)Response.Headers["Retry-After"]=error.RetrySeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return Error(error.Status,error.Message);
+    }
+
+    static async Task<HttpResponseMessage> SendTorBox(HttpRequestMessage request,string key,CancellationToken token) {
+        string scope=SeriesKeyHash(key)+":"+request.Method.Method+":"+request.RequestUri.AbsolutePath;
+        if(rateWindows.TryGetValue(scope,out DateTimeOffset until) && until>DateTimeOffset.UtcNow)throw RateError(until);
+        var response=await client.SendAsync(request,token);
+        if((int)response.StatusCode!=429)return response;
+        using(response) {
+            var retry=response.Headers.RetryAfter;
+            var now=DateTimeOffset.UtcNow;
+            if(retry?.Date is {} date)until=date;
+            else if(retry?.Delta is {} delay)until=now.AddSeconds(Math.Min(delay.TotalSeconds,int.MaxValue));
+            else throw new TorBoxException(429,"TorBox ограничил частоту запросов. Попробуйте позже");
+            if(until<=now)throw new TorBoxException(429,"TorBox ограничил частоту запросов. Попробуйте снова");
+            lock(rateWindows) {
+                if(rateWindows.TryGetValue(scope,out DateTimeOffset previous) && previous>until)until=previous;
+                rateWindows.Set(scope,until,new MemoryCacheEntryOptions { AbsoluteExpiration=until, Size=1 });
+            }
+            throw RateError(until);
+        }
     }
 
     async Task<JToken> Call(string path, string key, HttpContent body = null, CancellationToken cancellationToken = default, bool allowMissing = false, HttpMethod method = null, bool shared = false)
@@ -157,9 +189,7 @@ public partial class TorBoxController : BaseController
         req.Headers.UserAgent.ParseAdd("Lampac-TorBox/1.0");
         req.Content = body;
         using var linked=!shared && cancellationToken.CanBeCanceled?CancellationTokenSource.CreateLinkedTokenSource(cancellationToken,HttpContext.RequestAborted):null;
-        using var resp = await client.SendAsync(req, shared?cancellationToken:linked?.Token??HttpContext.RequestAborted);
-        if (resp.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
-            throw new TorBoxException(429, "TorBox ограничил частоту запросов. Попробуйте позже");
+        using var resp = await SendTorBox(req,key,shared?cancellationToken:linked?.Token??HttpContext.RequestAborted);
         if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized || resp.StatusCode == System.Net.HttpStatusCode.Forbidden)
             throw new TorBoxException(502, "TorBox отклонил запрос: проверьте API-ключ и доступность сервиса");
         string text;
@@ -498,6 +528,7 @@ public partial class TorBoxController : BaseController
     class TorBoxException : Exception {
         public int Status;
         public bool UnsupportedEndpoint;
+        public int RetrySeconds;
         public TorBoxException(int status, string message) : base(message) { Status = status; }
     }
 }

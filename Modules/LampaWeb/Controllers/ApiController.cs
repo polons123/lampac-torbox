@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Net.Http.Headers;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Shared;
@@ -13,6 +14,8 @@ using System.Collections.Generic;
 using System.Formats.Tar;
 using System.IO.Compression;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Threading;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Web;
@@ -131,8 +134,19 @@ public class ApiController : BaseController
 
 
     #region app.min.js
+    // Keep the last fully rendered bundle. Request-specific transformations always run per request.
+    sealed record AppBundle((string type, string origin, bool cubProxy, string mirror, string source, string rules) Key,
+        byte[] Body, EntityTagHeaderValue Tag);
+
+    static AppBundle lastBundle;
+
+    ActionResult ServeApp(AppBundle bundle)
+    {
+        Response.Headers.CacheControl = "private, no-cache";
+        return File(bundle.Body, "application/javascript; charset=utf-8", null, bundle.Tag);
+    }
+
     [HttpGet, AllowAnonymous]
-    [Staticache(20, always: true)]
     [Route("/app.min.js")]
     [Route("{type}/app.min.js")]
     public ActionResult LampaApp(string type)
@@ -156,24 +170,34 @@ public class ApiController : BaseController
             type = Regex.Replace(type, "[^a-z0-9\\-]", "");
         }
 
-        string file = IO.File.ReadAllText($"wwwroot/{type}/app.min.js");
+        var config = ModInit.conf;
+        var handlers = EventListener.AppReplace;
+        bool cubProxy = config.initPlugins.cubProxy && LampaPluginBuilder.ModuleLoaded("CubProxy");
+        string mirror = cubProxy ? CoreInit.conf.cub.mirror : null;
+        string origin = host;
+        var rules = config.appReplace?.Select(r => new KeyValuePair<string, string>(r.Key,
+            r.Value.StartsWith("file:") ? IO.File.ReadAllText(r.Value.Substring(5)) : r.Value)).ToArray();
 
-        #region appReplace
-        if (ModInit.conf.appReplace != null)
+        using var stream = IO.File.OpenRead($"wwwroot/{type}/app.min.js");
+        var key = (type, origin, cubProxy, mirror,
+            handlers == null ? Convert.ToHexString(SHA256.HashData(stream)) : null,
+            rules == null ? null : JsonConvert.SerializeObject(rules));
+        var cached = Volatile.Read(ref lastBundle);
+        if (handlers == null && cached != null && cached.Key == key)
+            return ServeApp(cached);
+
+        stream.Position = 0;
+        using var reader = new IO.StreamReader(stream);
+        string file = reader.ReadToEnd();
+        if (rules != null)
         {
-            string _host = Regex.Replace(host, "^https?://", "");
-
-            foreach (var r in ModInit.conf.appReplace)
+            string hostname = Regex.Replace(origin, "^https?://", "");
+            foreach (var r in rules)
             {
-                string val = r.Value;
-                if (val.StartsWith("file:"))
-                    val = IO.File.ReadAllText(val.Substring(5));
-
-                val = val.Replace("{localhost}", host).Replace("{host}", _host);
+                string val = r.Value.Replace("{localhost}", origin).Replace("{host}", hostname);
                 file = Regex.Replace(file, r.Key, val, RegexOptions.IgnoreCase);
             }
         }
-        #endregion
 
         var bulder = new StringBuilder();
         bulder = bulder.Append(file);
@@ -182,24 +206,24 @@ public class ApiController : BaseController
         bulder = bulder.Replace("MagnetUri: e.downloadUrl,",
             "MagnetUri: e.downloadUrl || (typeof e.guid === 'string' && e.guid.indexOf('magnet:?') === 0 ? e.guid : e.magnetUrl),");
 
-        if (ModInit.conf.initPlugins.cubProxy && LampaPluginBuilder.ModuleLoaded("CubProxy"))
+        if (cubProxy)
         {
-            bulder = bulder.Replace("protocol + mirror + '/api/checker'", $"'{host}/cub/api/checker'");
+            bulder = bulder.Replace("protocol + mirror + '/api/checker'", $"'{origin}/cub/api/checker'");
 
             string utlprotocol = file.Contains("Utils$1.protocol()") ?
                 "Utils$1.protocol()" :
                 "Utils$2.protocol()";
 
-            bulder = bulder.Replace($"{utlprotocol} + 'tmdb.' + object$2.cub_domain + '/' + u,", $"'{host}/cub/tmdb./' + u,");
-            bulder = bulder.Replace($"{utlprotocol} + object$2.cub_domain", $"'{host}/cub/red'");
-            bulder = bulder.Replace("object$2.cub_domain", $"'{CoreInit.conf.cub.mirror}'");
+            bulder = bulder.Replace($"{utlprotocol} + 'tmdb.' + object$2.cub_domain + '/' + u,", $"'{origin}/cub/tmdb./' + u,");
+            bulder = bulder.Replace($"{utlprotocol} + object$2.cub_domain", $"'{origin}/cub/red'");
+            bulder = bulder.Replace("object$2.cub_domain", $"'{mirror}'");
         }
 
-        bulder = bulder.Replace("http://lite.lampa.mx", $"{host}/{type}");
-        bulder = bulder.Replace("https://yumata.github.io/lampa-lite", $"{host}/{type}");
+        bulder = bulder.Replace("http://lite.lampa.mx", $"{origin}/{type}");
+        bulder = bulder.Replace("https://yumata.github.io/lampa-lite", $"{origin}/{type}");
 
-        bulder = bulder.Replace("http://lampa.mx", $"{host}/{type}");
-        bulder = bulder.Replace("https://yumata.github.io/lampa", $"{host}/{type}");
+        bulder = bulder.Replace("http://lampa.mx", $"{origin}/{type}");
+        bulder = bulder.Replace("https://yumata.github.io/lampa", $"{origin}/{type}");
 
         bulder = bulder.Replace("window.lampa_settings.dcma = dcma;", "window.lampa_settings.fixdcma = true;");
         bulder = bulder.Replace("Storage.get('vpn_checked_ready', 'false')", "true");
@@ -211,12 +235,12 @@ public class ApiController : BaseController
         bulder = bulder.Replace("function stat$1(method, name) {", "function stat$1(method, name) { return;");
         bulder = bulder.Replace("if (domain) {", "if (false) {");
 
-        bulder = bulder.Replace("{localhost}", host);
+        bulder = bulder.Replace("{localhost}", origin);
 
-        if (EventListener.AppReplace != null)
+        if (handlers != null)
         {
-            foreach (Func<string, EventAppReplace, StringBuilder> handler in EventListener.AppReplace.GetInvocationList())
-                bulder = handler.Invoke("appjs", new EventAppReplace(bulder, null, type, host, requestInfo, HttpContext.Request));
+            foreach (Func<string, EventAppReplace, StringBuilder> handler in handlers.GetInvocationList())
+                bulder = handler.Invoke("appjs", new EventAppReplace(bulder, null, type, origin, requestInfo, HttpContext.Request));
         }
 
         // Set the Android client's default before Lampa initializes its settings and input fields.
@@ -231,7 +255,11 @@ public class ApiController : BaseController
 
             """);
 
-        return ContentTo(bulder, "application/javascript; charset=utf-8");
+        byte[] bytes = Encoding.UTF8.GetBytes(bulder.ToString());
+        var tag = new EntityTagHeaderValue("\"" + Convert.ToHexString(SHA256.HashData(bytes)) + "\"", isWeak: true);
+        var bundle = new AppBundle(key, bytes, tag);
+        if (handlers == null) Volatile.Write(ref lastBundle, bundle);
+        return ServeApp(bundle);
     }
     #endregion
 
@@ -350,7 +378,7 @@ public class ApiController : BaseController
             string replaceHost = WidgetHost(overwritehost);
             bool legacy = double.TryParse(tizen, System.Globalization.CultureInfo.InvariantCulture, out double tizenver) && tizenver <= 3;
 
-            string cache = $"cache/widgets/samsung/{Shared.Services.Utilities.CrypTo.md5($"{replaceHost}|v5|{legacy}")}";
+            string cache = $"cache/widgets/samsung/{Shared.Services.Utilities.CrypTo.md5($"{replaceHost}|v6|{legacy}")}";
             string wgt = $"{cache}.wgt";
 
             lock (WidgeLock)
@@ -474,7 +502,7 @@ public class ApiController : BaseController
         {
             string replaceHost = WidgetHost(overwritehost);
 
-            string cache = $"cache/widgets/lg/{Shared.Services.Utilities.CrypTo.md5($"{replaceHost}|v02")}";
+            string cache = $"cache/widgets/lg/{Shared.Services.Utilities.CrypTo.md5($"{replaceHost}|v03")}";
             string ipk = $"{cache}.ipk";
 
             if (!IO.File.Exists(ipk))

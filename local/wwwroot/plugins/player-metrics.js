@@ -7,6 +7,105 @@
         var L = window.Lampa;
         if (!L || !window.Lampa.PlayerVideo || !window.Lampa.PlayerInfo || !window.Lampa.Player) return false;
         var active = false, timer = null, state = null, row = null;
+        var pending = new WeakMap(), session = null, lastSummary = '', ready = false;
+        var observed = null, frameId = null;
+
+        function now() { return window.performance && window.performance.now ? window.performance.now() : Date.now(); }
+        window.lampacPlaybackMetrics = {
+            choosing: function () { return {shown: now()}; },
+            begin: function (offer) {
+                var clicked = now();
+                return {clicked: clicked, choice: offer ? clicked - offer.shown : null};
+            },
+            resolved: function (token, cell) {
+                if (token && cell) pending.set(cell, {choice: token.choice, link: now() - token.clicked});
+            }
+        };
+        // Native TorrServer can start synchronously or wait for preload before Player.create.
+        // Only the latter exposes distinct click and stream-ready times.
+        var torrentPicks = new WeakMap(), listOffer = null;
+        if (L.Listener) L.Listener.follow('torrent_file', function (e) {
+            if (e.type === 'list_open' || e.type === 'list_close') {
+                torrentPicks = new WeakMap();
+                listOffer = e.type === 'list_open' ? window.lampacPlaybackMetrics.choosing() : null;
+            }
+            if (e.type !== 'render' || !listOffer || !e.element || !e.item) return;
+            var pick = {offer: listOffer};
+            torrentPicks.set(e.element, pick);
+            e.item.on('hover:enter', function () {
+                if (torrentPicks.get(e.element) === pick) pick.click = window.lampacPlaybackMetrics.begin(pick.offer);
+            });
+        });
+        L.Player.listener.follow('create', function (e) {
+            var cell = e.data, pick = cell && torrentPicks.get(cell);
+            if (!pick) return;
+            torrentPicks.delete(cell);
+            if (pick.click) window.lampacPlaybackMetrics.resolved(pick.click, cell);
+            else pending.set(cell, {choice: now() - pick.offer.shown, link: null});
+        });
+        function take(cell) {
+            var measured = cell && pending.get(cell);
+            if (cell) pending.delete(cell);
+            return measured || {choice: null, link: null};
+        }
+        function duration(ms) { return ms == null ? '—' : (ms / 1000).toFixed(2).replace('.', ',') + ' с'; }
+        function summary(s) {
+            var phases = 'Выбор файла ' + duration(s.choice) + ' · Ссылка ' + duration(s.link);
+            if (s.external) return phases + ' · Внешний плеер: данные о кадрах и буферизации недоступны';
+            var stalls = s.stallMs + (s.waitFrom == null ? 0 : now() - s.waitFrom);
+            return phases + (s.estimate ? ' · Старт (playing) ' : ' · До первого кадра ') + duration(s.frame) +
+                ' · Буферизация ' + (s.frame == null ? '—' : s.stalls + ' / ' + duration(stalls));
+        }
+        function finishWait() {
+            if (session && session.waitFrom != null) {
+                session.stallMs += now() - session.waitFrom;
+                session.waitFrom = null;
+            }
+        }
+        function waitingForData() {
+            if (session && session.frame != null && session.waitFrom == null && !observed.paused && !observed.ended && !observed.seeking) {
+                session.waitFrom = now();
+                session.stalls++;
+            }
+        }
+        function playing() {
+            finishWait();
+            if (session && session.frame == null && typeof observed.requestVideoFrameCallback !== 'function') {
+                session.frame = now() - session.start;
+                session.estimate = true;
+            }
+        }
+        function unbindVideo() {
+            finishWait();
+            if (!observed) return;
+            if (frameId != null && observed.cancelVideoFrameCallback) observed.cancelVideoFrameCallback(frameId);
+            observed.removeEventListener('waiting', waitingForData);
+            observed.removeEventListener('playing', playing);
+            ['pause', 'seeking', 'ended'].forEach(function (event) { observed.removeEventListener(event, finishWait); });
+            observed = null;
+            frameId = null;
+        }
+        function bindVideo(video) {
+            if (!ready || !session || observed === video) return;
+            unbindVideo();
+            if (!video || !video.addEventListener || !video.removeEventListener) return;
+            observed = video;
+            observed.addEventListener('waiting', waitingForData);
+            observed.addEventListener('playing', playing);
+            ['pause', 'seeking', 'ended'].forEach(function (event) { video.addEventListener(event, finishWait); });
+            if (session.frame == null && typeof video.requestVideoFrameCallback === 'function') {
+                var current = session;
+                frameId = video.requestVideoFrameCallback(function (time) {
+                    if (current !== session || video !== observed) return;
+                    current.frame = Math.max(0, time - current.start);
+                    frameId = null;
+                });
+            }
+        }
+        if (L.SettingsApi && L.SettingsApi.addParam) L.SettingsApi.addParam({
+            component: 'player', param: {type: 'button'}, field: {name: 'Статистика последнего запуска'},
+            onChange: function () { L.Noty.show(session ? summary(session) : lastSummary || 'В этом сеансе плеер ещё не запускался'); }
+        });
         var nativeSet = L.PlayerInfo.set;
         // Suppress the old HLS statistic only while our replacement is active.
         L.PlayerInfo.set = function (name, value) {
@@ -33,6 +132,7 @@
             if (!active) return;
             hookHls();
             var video = L.PlayerVideo.video();
+            bindVideo(video);
             var info = L.PlayerInfo.render();
             if (!info || !info.find) return;
             var values = info.find('.player-info__values');
@@ -55,7 +155,7 @@
                 if (Date.now() - current.sampleAt < 15000) speed = current.speed;
             }
             var seconds = video ? buffer(video) : null;
-            row.find('span').text('Поток ' + (number(bits) ? '≈' : '') + rate(bits) + ' · Загрузка ' + (number(speed) ? '≈' : '') + rate(speed) + ' · Буфер ' + (seconds === null ? '—' : seconds.toFixed(1).replace('.', ',') + ' с'));
+            row.find('span').text('Поток ' + (number(bits) ? '≈' : '') + rate(bits) + ' · Загрузка ' + (number(speed) ? '≈' : '') + rate(speed) + ' · Буфер ' + (seconds === null ? '—' : seconds.toFixed(1).replace('.', ',') + ' с') + (session ? ' · ' + summary(session) : ''));
         }
         function hookHls() {
             var H = window.Hls;
@@ -89,18 +189,35 @@
             H.prototype.attachMedia = attach;
         }
         function stop() {
+            unbindVideo();
+            if (session) lastSummary = summary(session);
+            session = null; ready = false;
             active = false;
             clearInterval(timer); timer = null; state = null;
             if (row) row.remove();
             row = null;
         }
-        L.Player.listener.follow('start', function () {
-            stop(); active = true; hookHls();
+        L.Player.listener.follow('external', function (cell) {
+            stop();
+            var external = take(cell);
+            external.external = true;
+            lastSummary = summary(external);
+        });
+        L.Player.listener.follow('start', function (cell) {
+            stop();
+            session = take(cell);
+            session.start = now();
+            session.frame = null;
+            session.waitFrom = null;
+            session.stalls = 0;
+            session.stallMs = 0;
+            active = true; hookHls();
             timer = setInterval(update, 1000);
             update();
         });
+        L.Player.listener.follow('ready', function () { ready = true; update(); });
         L.Player.listener.follow('destroy', stop);
-        L.PlayerVideo.listener.follow('destroy', function () { state = null; });
+        L.PlayerVideo.listener.follow('destroy', function () { state = null; unbindVideo(); });
         L.PlayerVideo.listener.follow('timeupdate', update);
         L.PlayerVideo.listener.follow('progress', update);
         hookHls();

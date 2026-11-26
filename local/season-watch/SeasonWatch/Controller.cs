@@ -64,6 +64,7 @@ public class SeasonWatchController : BaseController
         public int season {get;set;}
         public string choice {get;set;}
         public string confirmation {get;set;}
+        public bool keep_both {get;set;}
         public string media_type {get;set;}
         public int identity {get;set;}
     }
@@ -83,7 +84,7 @@ public class SeasonWatchController : BaseController
             (!string.IsNullOrEmpty(input.confirmation) && !Regex.IsMatch(input.confirmation,@"\A[a-f0-9]{64}\z")) ||
             input.season<0 || input.season>999 || !string.IsNullOrEmpty(input.choice) && !Regex.IsMatch(input.choice,@"\A[a-f0-9]{64}\z"))
             return Task.FromResult(Error(400,"Некорректный выбор"));
-        return Run("update",input.place,input.hash,input.season.ToString(),input.choice??"",input.confirmation??"");
+        return Run("update",input.place,input.hash,input.season.ToString(),input.choice??"",input.confirmation??"",input.keep_both?"keep":"replace");
     }
     [HttpPost, Route("season-watch/identity"), RequestSizeLimit(1024)]
     public Task<ActionResult> Identity([FromBody] Input input) {

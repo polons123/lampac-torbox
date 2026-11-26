@@ -68,13 +68,17 @@ def main():
 import sys,os,json,time,subprocess
 mode=sys.argv[-1]
 with open('probe-starts','a') as f:f.write(mode+'\\n')
+if '/batch-' in mode:
+ with open('parallel-probes','a') as f:f.write(f'{time.monotonic()} +1\\n')
+ time.sleep(.25)
+ with open('parallel-probes','a') as f:f.write(f'{time.monotonic()} -1\\n')
 if '/hang' in mode:
  child=subprocess.Popen(['/usr/bin/python3','-c','import time;time.sleep(120)'])
  with open('probe-pids','w') as f:f.write(str(os.getpid())+' '+str(child.pid))
  time.sleep(120)
 if '/empty' in mode:sys.exit(0)
 if '/stderr' in mode:sys.stderr.write('x'*2000000);sys.stderr.flush()
-time.sleep(.2)
+if '/batch-' not in mode:time.sleep(.2)
 print(json.dumps({'streams':[{'codec_type':'video','codec_name':'h264'}],'format':{'bit_rate':'1200000'}}))
 ''');fake.chmod(0o755)
         def get(path):
@@ -99,6 +103,18 @@ print(json.dumps({'streams':[{'codec_type':'video','codec_name':'h264'}],'format
             assert all(code==200 and data.get('streams') for code,data in result),result
             assert sum('/ok' in line for line in (root/'probe-starts').read_text().splitlines())==1
             print('PASS concurrent identical probes execute once',flush=True)
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures=[pool.submit(probe,'batch-'+str(i)) for i in range(8)]
+                until=time.monotonic()+2
+                while not (root/'parallel-probes').exists() and time.monotonic()<until: time.sleep(.01)
+                assert probe('ok')[1].get('streams')
+                assert not all(f.done() for f in futures), 'cached reads should bypass backlog'
+                assert all(f.result()[0]==200 for f in futures)
+            running=peak=0
+            for line in sorted((root/'parallel-probes').read_text().splitlines(),key=lambda s:float(s.split()[0])):
+                running+=int(line.split()[1]);peak=max(peak,running)
+            print('Measured peak for 8 separate cold files:',peak,flush=True)
+            assert 1<=peak<=2 and running==0
             assert probe('stderr')[1].get('streams');print('PASS large stderr drains concurrently',flush=True)
             started=time.monotonic()
             with ThreadPoolExecutor(max_workers=2) as pool:result=list(pool.map(lambda _:probe('hang'),range(2)))

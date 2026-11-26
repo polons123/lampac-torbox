@@ -10,7 +10,8 @@ import time
 from pathlib import Path
 from providers import release_summary, measured_tags, HASH, NAMES, VIDEO, Providers, Unavailable, digest, episode_files, season_hint, file_pair, explicit_episodes
 from urllib.parse import quote, urlsplit
-from concurrent.futures import ThreadPoolExecutor
+import signal
+import subprocess
 
 ROOT = Path('/var/lib/season-watch')
 STATE = ROOT / 'state.json'
@@ -536,38 +537,121 @@ def card(t,place,metadata=None):
         poster=poster_url(t.get('poster')),year=t.get('year',''),movie=t['movie'],tv=t['tv'],tmdb=t.get('tmdb'),original=t.get('original'),
         box_id=t['raw'].get('id') if place=='box' else None)
 
-def catalog(p,st):
-    metadata=st.get('release_metadata',{})
-    updates={}
-    cards=[]
-    errors={}
-    with ThreadPoolExecutor(max_workers=len(NAMES)) as pool:
-        jobs={place:pool.submit(p.inventory,place) for place in NAMES}
-        deadline=None
-        for place,job in jobs.items():
-            try:
-                items=[]
-                for torrent in job.result():
-                    t=enriched(p,st,torrent,place)
-                    if deadline is None:deadline=time.monotonic()+6
-                    items.append(card(t,place,live_metadata(p,t,metadata,updates,deadline)))
-            except ERRORS as exc:
-                errors[place]=optional_label(exc)
-                items=st.get('catalog',{}).get(place,[])
-            for data in items:
-                h=data['hash']
-                if place+':'+h in st['replaced']: continue
-                data=dict(data)
-                watches=[w for w in st['watches'].values() if w['place']==place and w['hash']==h]
-                data['identities']=next((w['identities'] for w in watches if w.get('identities')),[])
-                data['seasons']=sorted([dict(stale=w.get('stale',False) or place in errors,asof=w.get('asof'),n=w['season'],id=w['id'],ready=w['ready'],waiting=w['waiting'],tmdb=w.get('tmdb')) for w in watches if w['season']],key=lambda x:x['n'])
-                cards.append(data)
-    cache_metadata(updates,metadata)
+def catalog_place(p, st, place, inventory=None):
+    metadata = st.get('release_metadata', {})
+    updates = {}
+    cards = []
+    deadline = time.monotonic() + 6
+    for torrent in (inventory if inventory is not None else p.inventory(place)):
+        t = enriched(p, st, torrent, place)
+        cards.append(card(t, place, live_metadata(p, t, metadata, updates, deadline)))
+    cache_metadata(updates, metadata)
+    metadata.update(updates)
+    st['release_metadata'] = metadata
+    return cards
+
+def catalog_response(st, groups, errors, stale=None, refreshing=None):
+    cards = []
+    for place, items in groups.items():
+        for data in items:
+            h = data['hash']
+            if place+':'+h in st['replaced']:
+                continue
+            data = dict(data)
+            watches = [w for w in st['watches'].values() if w['place']==place and w['hash']==h]
+            data['identities'] = next((w['identities'] for w in watches if w.get('identities')), [])
+            data['seasons'] = sorted([dict(stale=w.get('stale',False) or place in errors,
+                asof=w.get('asof'),n=w['season'],id=w['id'],ready=w['ready'],waiting=w['waiting'],
+                tmdb=w.get('tmdb')) for w in watches if w['season']],key=lambda x:x['n'])
+            if stale and place in stale:
+                data['inventory_asof'] = stale[place]
+            cards.append(data)
     grouped=grouped_receipts(st)
     pending={k:r for k,r in st.get('deletions',{}).items() if k not in grouped}
     pending.update({k:j for k,j in st.get('removal_groups',{}).items() if not j.get('failed')})
-    return dict(cards=cards,errors=errors,pending=[dict(place=k.split(':')[0],hash=k.split(':')[1],due=r['due'])
-        for k,r in pending.items()])
+    return dict(cards=cards,errors=errors,refreshing=refreshing or [],
+        pending=[dict(place=k.split(':')[0],hash=k.split(':')[1],due=r['due']) for k,r in pending.items()])
+
+def catalog(p, st):
+    # Synchronous reader for diagnostics and the isolated provider fixtures.
+    groups, errors = {}, {}
+    for place in NAMES:
+        try: groups[place] = catalog_place(p, st, place)
+        except ERRORS as exc:
+            errors[place] = optional_label(exc)
+            groups[place] = st.get('catalog', {}).get(place, [])
+    return catalog_response(st, groups, errors)
+
+def snapshot_path(place):
+    return ROOT / ('inventory-' + place + '.json')
+
+def snapshot(place):
+    try: return json.loads(snapshot_path(place).read_bytes())
+    except FileNotFoundError: return {}
+
+def inventory_epoch(place):
+    try: return (ROOT / ('inventory-' + place + '.epoch')).stat().st_mtime_ns
+    except FileNotFoundError: return 0
+
+def refresh_inventory(p, place, epoch):
+    # Keep the previous successful data even if the provider or an artwork lookup stalls.
+    class InventoryTimeout(Exception): pass
+    def timeout(signum, frame):
+        raise InventoryTimeout()
+    last = snapshot(place)
+    signal.signal(signal.SIGALRM, timeout)
+    signal.alarm(45)
+    try:
+        st = state()
+        inventory = p.inventory(place)
+        now = int(time.time())
+        # A ready provider can be displayed while optional artwork and tags are fetched.
+        cached = st.get('release_metadata',{})
+        quick = [card(enriched(p,st,t,place,lookup=False),place,cached.get(t['hash'])) for t in inventory]
+        last = dict(cards=quick, asof=now, partial=True, epoch=epoch)
+        atomic(snapshot_path(place),last)
+        rows = catalog_place(p, st, place, inventory)
+        last = dict(cards=rows, asof=now)
+    except (InventoryTimeout, *ERRORS) as exc:
+        last['error'] = optional_label(exc)
+    finally:
+        signal.alarm(0)
+    last.pop('partial',None)
+    last.update(attempt=time.time(), epoch=epoch)
+    atomic(snapshot_path(place), last)
+
+def start_inventory_refresh(place, epoch):
+    # An inherited flock spans CLI processes and is released if the updater dies.
+    with (ROOT / ('inventory-' + place + '.lock')).open('a') as lock:
+        try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError: return
+        if inventory_current(snapshot(place), epoch): return
+        subprocess.Popen([sys.executable, '-B', __file__, 'refresh-inventory', place, str(epoch)],
+            pass_fds=(lock.fileno(),), start_new_session=True, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def inventory_current(value, epoch):
+    return value.get('epoch') == epoch and time.time() - value.get('attempt',0) < (10 if value.get('error') else 30)
+
+def quick_catalog(st):
+    epochs = {place:inventory_epoch(place) for place in NAMES}
+    snapshots = {place:snapshot(place) for place in NAMES}
+    missing = [p for p in NAMES if not inventory_current(snapshots[p],epochs[p])]
+    for place in missing: start_inventory_refresh(place,epochs[place])
+    deadline = time.monotonic() + .45
+    while missing and time.monotonic() < deadline:
+        time.sleep(.05)
+        for place in missing: snapshots[place] = snapshot(place)
+        missing = [p for p in missing if not inventory_current(snapshots[p],epochs[p])]
+    groups, stale, errors = {}, {}, {}
+    for place, value in snapshots.items():
+        checked = st['checked'].get(place,{})
+        use_snapshot = 'cards' in value and value.get('epoch')==epochs[place] and (checked.get('error') or value.get('asof',0) >= checked.get('time',0))
+        groups[place] = value['cards'] if use_snapshot else st.get('catalog',{}).get(place,[])
+        if value.get('error'): errors[place] = value['error']
+        if place in errors or (place in missing and not (use_snapshot and value.get('partial'))):
+            stale[place] = value.get('asof',0) if use_snapshot else checked.get('time',0)
+    return catalog_response(st,groups,errors,stale,missing)
 
 def existing(p,place,h):
     if place not in NAMES or not HASH.fullmatch(h):
@@ -857,12 +941,27 @@ def check_removal(p,st,place,h):
     key=place+':'+h
     return advance_group(p,st,key) if key in st.get('removal_groups',{}) else verify_deletion(p,st,place,h)
 
-def update_release(p,st,place,h,season,selection='',confirmation='',actor=None):
+def release_files_delta(previous, proposed):
+    def entries(rows):
+        result = {}
+        for f in rows:
+            path = (f.get('path') or f['name']).replace(chr(92),'/')
+            sizes = result.setdefault(path,set())
+            size = int(f.get('length') or f.get('size') or 0)
+            if size: sizes.add(size)
+        return result
+    old, new = entries(previous), entries(proposed)
+    return dict(added=sorted(new.keys()-old.keys()), removed=sorted(old.keys()-new.keys()),
+                changed=sorted(path for path in old.keys() & new.keys()
+                               if old[path] and new[path] and old[path]!=new[path]))
+
+def update_release(p,st,place,h,season,selection='',confirmation='',actor=None,keep_both=False):
     key=place+':'+h
     if not confirmation:
         st=deepcopy(st)
     prior=st.get('removal_groups',{}).get(key)
     if prior:
+        if keep_both: raise Unavailable('Очистка уже началась')
         if prior['keep']:
             if not prior.get('failed'): return dict(message='Предыдущие версии ожидают подтверждения удаления')
             live=p.inventory(place)
@@ -921,10 +1020,21 @@ def update_release(p,st,place,h,season,selection='',confirmation='',actor=None):
     offer=dict(place=place,original=h,candidate=newh,label=w['new_label'],season=season,ready=w['ready'],
                versions=retiring_cards,source=w['source']['page'],
                candidate_id=next((row['raw'].get('id') for row in previous if row['hash']==newh),None))
+    old_files = []
+    unknown = []
+    for row in retiring:
+        # Archived torrents can be offline. Reading their inventory must not attach them.
+        try: files = media_files(p,place,row) if row['hash']==h else row.get('files',[])
+        except ERRORS: files = []
+        if files: old_files.extend(files)
+        else: unknown.append(row['label'])
+    offer['files'] = release_files_delta(old_files, p.candidate_files(place,newh))
+    offer['unknown_files'] = unknown
     signature=digest(json.dumps(offer,sort_keys=True,ensure_ascii=False))
+    keep_signature=digest('keep-both/'+signature)
     if not confirmation:
-        return dict(offer=offer,confirmation=signature)
-    if confirmation!=signature:
+        return dict(offer=offer,confirmation=signature,keep_confirmation=keep_signature)
+    if confirmation!=(keep_signature if keep_both else signature):
         raise Unavailable('Вариант обновления изменился. Откройте предпросмотр ещё раз')
     new=apply(p,st,w,t)
     newh=new['hash']
@@ -941,8 +1051,12 @@ def update_release(p,st,place,h,season,selection='',confirmation='',actor=None):
         elif not saved.get('poster'):
             saved['poster']=t['poster']
         remember_card(st,saved,place)
-    st['replaced'][place+':'+h]=newh
     if w.get('tmdb'):st['identities'][newh]=w['tmdb']
+    if keep_both:
+        st['sources'][item_id(place,newh,season)]=w['source']
+        save(st)
+        return dict(message='Обе версии сохранены',hash=newh,ready=w['ready'],pending=False)
+    st['replaced'][place+':'+h]=newh
     for oldrow in list(st['watches'].values()):
         if oldrow['place']==place and oldrow['hash']==h:
             bound=st['sources'].get(oldrow['id'])
@@ -979,7 +1093,10 @@ def main():
     args=sys.argv[1:]
     p=Providers()
     if args==['catalog']:
-        result=catalog(p,state())
+        result=quick_catalog(state())
+    elif len(args)==3 and args[0]=='refresh-inventory' and args[1] in NAMES:
+        refresh_inventory(p,args[1],int(args[2]))
+        return
     elif len(args)==3 and args[0]=='media':
         result=media(p,*args[1:])
     else:
@@ -999,9 +1116,12 @@ def main():
                 result=set_film(p,st,*args[1:],os.environ['SEASON_WATCH_ACTOR'])
             elif len(args)==4 and args[0]=='identity':
                 result=choose_identity(p,st,args[1],args[2],args[3])
-            elif len(args)==6 and args[0]=='update':
-                result=update_release(p,st,args[1],args[2],int(args[3]),args[4],confirmation=args[5],actor=os.environ.get('SEASON_WATCH_ACTOR'))
+            elif len(args) in (6,7) and args[0]=='update':
+                result=update_release(p,st,args[1],args[2],int(args[3]),args[4],confirmation=args[5],actor=os.environ.get('SEASON_WATCH_ACTOR'),keep_both=args[6:]==['keep'])
             else: raise Unavailable('Некорректная команда')
+            if len(args)>1 and args[1] in NAMES and args[0] in ('remove','verify-remove','film','identity','update'):
+                if args[0]!='update' or args[5]:
+                    (ROOT / ('inventory-'+args[1]+'.epoch')).touch()
     print(json.dumps(result,ensure_ascii=False,separators=(',',':')))
 if __name__=='__main__':
     try: main()

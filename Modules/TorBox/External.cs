@@ -173,7 +173,7 @@ public partial class TorBoxController
             if(p.Revoked)return Error(410,"Ссылка отозвана");
             return Redirect(p.SourceUrl);
         }
-        catch(TorBoxException ex){return Error(ex.Status,ex.Message);}
+        catch(TorBoxException ex){return TorBoxError(ex);}
         catch{return Error(503,"Не удалось открыть сохранённую ссылку");}
     }
     // Authenticated account-wide revocation also works after changing a personal key.
@@ -222,7 +222,7 @@ public partial class TorBoxController
                 return Redirect(cached.Url);
             }finally{if(external.Revoked)external.Streams.Clear();external.State.Gate.Release();}
         }
-        catch(TorBoxException ex){return Error(ex.Status,ex.Message);}
+        catch(TorBoxException ex){return TorBoxError(ex);}
         catch(System.Net.Http.HttpRequestException){return Error(502,"Не удалось связаться с TorBox");}
         catch(TaskCanceledException){return Error(504,"TorBox не ответил вовремя");}
         catch{return Error(502,"Не удалось подготовить поток TorBox");}

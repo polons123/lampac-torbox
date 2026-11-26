@@ -52,17 +52,18 @@
     }
     function refreshBadge() { request('season-watch/list',null,function (d) {notices=d.items||[];drawBadge();},function () {badge.hide();}); }
     function grid() { Lampa.Activity.push({component:'all_releases',title:title,page:1}); }
+    var nextCatalog=null;
     function library(object) {
         Lampa.InteractionCategory.call(this,object);
         var self=this,alive=true,destroy=this.destroy,owner=account(),removing={},timers={};
         function valid() { return alive && owner===account(); }
-        function current() { var a=Lampa.Activity.active();return valid() && a && a.component==='all_releases'; }
+        function current() { var a=Lampa.Activity.active();return valid() && a && a.component==='all_releases' && (!a.activity || !a.activity.component || a.activity.component===self); }
         function back() { if (current()) Lampa.Controller.toggle('content'); }
         function error(s) { if(current()) {message(s);back();} }
-        function edit(c,season,choice,confirmation) {
+        function edit(c,season,choice,confirmation,keepBoth) {
             if (!current()) return;
             message('Проверяю раздачу');
-            request('season-watch/update',{place:c.place,hash:c.hash,season:season||0,choice:choice||'',confirmation:confirmation||''},function (r) {
+            request('season-watch/update',{place:c.place,hash:c.hash,season:season||0,choice:choice||'',confirmation:confirmation||'',keep_both:!!keepBoth},function (r) {
                 if (!current()) return;
                 if (r.seasons) return select('Выберите сезон',r.seasons.map(function (s) {
                     return {title:'Сезон '+s,run:function () {edit(c,s,'');}};
@@ -74,12 +75,29 @@
                     var offer=r.offer;
                     var episodes=offer.ready.map(function (n) {return number(offer.season,n);}).join(', ');
                     var versions=offer.versions.map(function (v) {return safe(v.label)+' ['+safe(v.hash.slice(0,8))+']';}).join('<br>');
-                    return select('Подтвердить обновление · '+names[c.place],[
-                        {title:'Отмена',run:function () {actions(c);}},
-                        {title:offer.retry?'Повторить очистку':'Подтвердить замену',
-                         subtitle:safe(offer.label)+(episodes?'<br>'+episodes:'')+'<br>Будут удалены:<br>'+versions,
-                         run:function () {edit(c,offer.season,choice,r.confirmation);}}
-                    ],function () {actions(c);});
+                    function preview() {
+                        var menu=[{title:'Отмена',run:function () {actions(c);}}];
+                        var delta=offer.files;
+                        if (delta) {
+                            [['added','Добавятся'],['removed','Исчезнут'],['changed','Изменится размер']].forEach(function (field) {
+                                var paths=delta[field[0]]||[];
+                                if (paths.length) menu.push({title:field[1]+' · '+paths.length,run:function () {
+                                    select(field[1],paths.map(function (path) {
+                                        return {title:safe(path),run:preview};
+                                    }),preview);
+                                }});
+                            });
+                        }
+                        var unknown=(offer.unknown_files||[]).map(safe);
+                        if (r.keep_confirmation) menu.push({title:'Сохранить обе версии',
+                            subtitle:safe(offer.label),run:function () {edit(c,offer.season,choice,r.keep_confirmation,true);}});
+                        menu.push({title:offer.retry?'Повторить очистку':'Подтвердить замену',
+                            subtitle:safe(offer.label)+(episodes?'<br>'+episodes:'')+'<br>Будут удалены:<br>'+versions+
+                                (unknown.length?'<br>Список файлов недоступен: '+unknown.join(', '):''),
+                            run:function () {edit(c,offer.season,choice,r.confirmation,false);}});
+                        select('Подтвердить обновление · '+names[c.place],menu,function () {actions(c);});
+                    }
+                    return preview();
                 }
                 message(r.message);
                 if (r.hash) {
@@ -96,11 +114,16 @@
             },error);
         }
         function play(c) {
+            var metrics=window.lampacPlaybackMetrics;
             withMedia(c,function (files,r) {
+                var offered=metrics && metrics.choosing();
                 function launch(f,n) {
+                    var attempt=metrics && metrics.begin(offered);
                     function open(address) {
                         if (!current()) return;
-                        var cell={url:address,title:n?number(f.season,n)+' · '+f.name:f.name,torrent_hash:c.hash,timeline:false};
+                        var cell={url:address,title:n?number(f.season,n)+' · '+f.name:f.name,torrent_hash:c.hash,
+                            timeline:c.place==='box' && window.lampac_torbox_file_timeline ? window.lampac_torbox_file_timeline(c.hash,f.id) : false};
+                        if (attempt) metrics.resolved(attempt,cell);
                         Lampa.Player.play(cell);
                         Lampa.Player.playlist(c.place==='box'?[cell]:files.map(function (x) {
                             return x===f?cell:{url:x.url,title:x.name,torrent_hash:c.hash,timeline:false};
@@ -243,7 +266,7 @@
             });}); Lampa.Storage.set(seenKey(),read);drawBadge();
             var rows=[{title:'Смотреть',subtitle:safe(c.release_summary || c.label),run:function () {play(c);}},
                 {title:'Сохранить в Infuse',subtitle:safe(c.release_summary || names[c.place]),run:function () {infuse(c);}},
-                {title:'Обновить',subtitle:names[c.place]+' · после успешного обновления прежние версии будут удалены',run:function () {edit(c,0,'');}}];
+                {title:'Обновить',subtitle:names[c.place]+' · просмотр файлов и выбор версий для сохранения',run:function () {edit(c,0,'');}}];
             rows.push({title:'Уточнить фильм или сериал',run:function () {clarify(c);}});
             if (c.identities && c.identities.length) rows.push({title:'Выбрать сериал в TMDB',run:function () {
                 select('Выберите сериал в TMDB',c.identities.map(function (candidate) {
@@ -258,19 +281,53 @@
             rows.push({title:'Удалить',subtitle:names[c.place],run:function () {confirmRemoval(c);}});
             select(c.title,rows,back);
         }
+        function catalogKey(d) {
+            return JSON.stringify([d.cards,d.errors,d.refreshing]);
+        }
+        function refreshSources(d) {
+            if (!(d.refreshing||[]).length || !valid()) return;
+            timers.catalog=setTimeout(function () {
+                request('season-watch/catalog',null,function (fresh) {
+                    if (!valid()) return;
+                    if (catalogKey(d)===catalogKey(fresh)) return refreshSources(fresh);
+                    function show() {
+                        if (!valid()) return;
+                        if (!current() || Lampa.Controller.enabled().name!=='content') {
+                            timers.catalog=setTimeout(show,750);
+                            return;
+                        }
+                        var focused=self.render().find('.all-releases-card.focus').attr('data-release-key');
+                        nextCatalog={owner:owner,data:fresh,focus:focused};
+                        reload();
+                    }
+                    show();
+                },function () { if (valid()) timers.catalog=setTimeout(function () {refreshSources(d);},2500); });
+            },1200);
+        }
         this.create=function () {
             self.activity.loader(true);
-            request('season-watch/catalog',null,function (d) {
+            var saved=nextCatalog;
+            nextCatalog=null;
+            function draw(d) {
                 if (!valid()) return;
                 (d.pending||[]).forEach(function (r) {followRemoval(r,r.due);});
-                var cards=d.cards||[];
+                var cards=(d.cards||[]).slice();
                 function score(c) {return c.seasons.some(function (s){return s.ready.length;})?0:c.seasons.some(function (s){return s.waiting.length;})?1:2;}
                 cards.sort(function (a,b) {return score(a)-score(b)||a.title.localeCompare(b.title)||a.place.localeCompare(b.place)||a.label.localeCompare(b.label);});
                 var results=cards.map(function (c) {return {id:c.place+'-'+c.hash,title:safe(c.title),original_title:safe(c.title),poster_path:/^https?:/.test(c.poster)?'':c.poster,img:/^https?:/.test(c.poster)?c.poster:undefined,release_date:c.year?c.year+'-01-01':'',item:c};});
-                if (!results.length) results.push({id:'empty',title:'Раздач пока нет'});
+                if (!results.length) results.push({id:'empty',title:(d.refreshing||[]).length?'Обновляются библиотеки…':'Раздач пока нет'});
                 self.build({results:results,total_pages:1});
+                if (saved && saved.focus && current()) {
+                    var node=self.render().find('.all-releases-card').filter(function () {
+                        return this.getAttribute('data-release-key')===saved.focus;
+                    }).first();
+                    if (node.length) Lampa.Controller.collectionFocus(node,self.render());
+                }
                 Object.keys(d.errors||{}).forEach(function (k) {message(names[k]+': '+d.errors[k]);});
-            },function (s) {if(valid()) {self.build({results:[{id:'retry',title:'Повторить загрузку'}],total_pages:1});message(s);}});
+                refreshSources(d);
+            }
+            if (saved && saved.owner===owner) draw(saved.data);
+            else request('season-watch/catalog',null,draw,function (s) {if(valid()) {self.build({results:[{id:'retry',title:'Повторить загрузку'}],total_pages:1});message(s);}});
         };
         this.next=function () {};
         this.cardRender=function (params,data,card) {
@@ -278,7 +335,9 @@
             node.addClass('all-releases-card');
             if (c) {
                 var q=/(?:2160|1080|720|480)[pр]|4K/i.exec(c.label);
+                node.attr('data-release-key',c.place+'-'+c.hash);
                 var info=[names[c.place],c.release_summary || (q && q[0])].filter(Boolean);
+                if (c.inventory_asof!==undefined) info.push('Сохранённый список'+(c.inventory_asof?' от '+new Date(c.inventory_asof*1000).toLocaleString():''));
                 (c.seasons||[]).forEach(function (s) {
                     if (s.stale) info.push('Последние данные'+(s.asof?' от '+new Date(s.asof*1000).toLocaleString():''));
                     if (s.ready.length) info.push('Доступна '+s.ready.map(function (n) {return number(s.n,n);}).join(', '));

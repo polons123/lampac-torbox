@@ -7,10 +7,10 @@ const assert = require('node:assert/strict');
 const delay = ms => new Promise(r => setTimeout(r,ms));
 (async function () {
     const dir='/opt/lampac/wwwroot/lampa-main';
-    let actions = 0, previews = 0, identities = 0;
+    let actions = 0, previews = 0, identities = 0, kept = 0;
     const selections=[];
     const deletions=[],gone=new Set();
-    let checks=0;
+    let checks=0,catalogCalls=0;
     let infuseMedia=false, incomplete=false, pairedMedia=false;
     const saves=[],batches=[];
     const fixture={items:[],checked:{peer:{time:1}},last:1};
@@ -19,7 +19,7 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
     const server=http.createServer((q,r)=>{
         const route=new URL(q.url,'http://localhost').pathname;
         if(route==='/season-watch/list') {r.setHeader('Content-Type','application/json');return r.end(JSON.stringify(fixture));}
-        if(route==='/season-watch/catalog') {r.setHeader('Content-Type','application/json');return r.end(JSON.stringify({cards:['peer','home','box'].map((place,i)=>({place,hash:String(i).repeat(40),box_id:place==='box'?77:null,identities:place==='peer' && !identities?[{value:'22',label:'Show (2024)'}]:[],title:'Test '+place,label:'1080p',release_summary:'1080p · WEB-DLRip',poster:'',year:'2026',movie:i===1,seasons:i===1?[]:[{n:2,ready:[3],waiting:[],tmdb:3}]})).filter(c=>!gone.has(c.place)),errors:{}}));}
+        if(route==='/season-watch/catalog') {catalogCalls++;r.setHeader('Content-Type','application/json');return r.end(JSON.stringify({cards:['peer','home','box'].map((place,i)=>({place,hash:String(i).repeat(40),box_id:place==='box'?77:null,identities:place==='peer' && !identities?[{value:'22',label:'Show (2024)'}]:[],title:'Test '+place,label:'1080p',release_summary:'1080p · WEB-DLRip',poster:'',year:'2026',movie:i===1,seasons:i===1?[]:[{n:2,ready:[3],waiting:[],tmdb:3}]})).filter(c=>!gone.has(c.place) && (catalogCalls>1 || c.place!=='box')),refreshing:catalogCalls===1?['box']:[],errors:{}}));}
         if(route==='/season-watch/remove' || route==='/season-watch/remove/check') {
             let data='';q.on('data',c=>data+=c);q.on('end',()=>{
                 const body=JSON.parse(data);r.setHeader('Content-Type','application/json');
@@ -61,7 +61,11 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
                     selections.push(body);identities++;return r.end(JSON.stringify({hash:body.hash,message:'TMDB'}));
                 }
                 if(!body.confirmation){
-                    previews++;return r.end(JSON.stringify({offer:{label:'New 1080p',season:2,ready:[3],versions:[{hash:body.hash,label:'Old 1080p'}]},confirmation:'c'.repeat(64)}));
+                    previews++;return r.end(JSON.stringify({offer:{label:'New 1080p',season:2,ready:[3],files:{added:['New.mkv'],removed:['Old.mkv'],changed:[]},versions:[{hash:body.hash,label:'Old 1080p'}]},keep_confirmation:'d'.repeat(64),confirmation:'c'.repeat(64)}));
+                }
+                if (body.keep_both) {
+                    assert.equal(body.confirmation,'d'.repeat(64));kept++;
+                    return r.end(JSON.stringify({message:'Обе версии сохранены',hash:'abcd'}));
                 }
                 assert.equal(body.confirmation,'c'.repeat(64));actions++;r.end(JSON.stringify({message:'Раздача обновлена',hash:'abcd'}));
             });return;
@@ -103,7 +107,7 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
             .replace('var network = new Network();','var network = new Network(); network.native=function(){};')
             .replace('var torboxVoiceMenu = null;',`var torboxVoiceMenu = null;
               this.fixtureResults=function(url) {
-                torboxVoiceMenu={search:url,options:['Studio A'],selected:'Studio A',filterSelected:{res:'1080p'},filterOptions:{}};
+                torboxVoiceMenu={search:url,options:['Studio A','Studio B'],selected:'Studio A',filterSelected:{res:'1080p'},filterOptions:{codec:['AVC','HEVC']}};
                 this.filter({season:[],voice:[]},this.getChoice());
               };`);
         await ev(component+'window.MatchComponent=component;})();');
@@ -127,6 +131,40 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
             assert.deepEqual(chosen.getAll('tb_possible'),[value]);
             assert.equal(chosen.get('tb_res'),'1080p');assert.equal(chosen.get('tb_voice'),'Studio A');
         }
+        async function setPreference(category,label) {
+            await ev("matchFilter.show('Фильтр','filter')");
+            const menu="testMenus.at(-1).items.find(i=>i.title==="+JSON.stringify(category)+")";
+            await until(menu); await ev("testMenus.at(-1).onSelect("+menu+")");
+            const option="testMenus.at(-1).items.find(i=>i.title==="+JSON.stringify(label)+")";
+            await until(option); await ev("testMenus.at(-1).onSelect("+option+")");
+            return new URL(await ev('matchUrl')).searchParams;
+        }
+        const format=await setPreference('Предпочитаемый формат','HEVC');
+        assert.deepEqual(format.getAll('tb_prefer_format'),['codec:HEVC']);
+        assert.deepEqual(format.getAll('tb_order'),['format']);
+        await setPreference('Предпочитаемая озвучка','Studio B');
+        const preferred=await setPreference('Порядок на этом устройстве','Сначала предпочитаемая озвучка');
+        assert.deepEqual(preferred.getAll('tb_order'),['voice']);
+        assert.deepEqual(preferred.getAll('tb_prefer_voice'),['Studio B']);
+        assert.deepEqual(preferred.getAll('tb_prefer_format'),['codec:HEVC']);
+        assert.deepEqual(preferred.getAll('tb_voice'),['Studio A']);
+        assert.deepEqual(preferred.getAll('tb_res'),['1080p']);
+        // A new component reads the same browser's stored settings. A second component with a
+        // separate browser storage area simulates another device logged in as the same user.
+        await ev("window.firstFilter=matchFilter");
+        const openFresh=`var fresh=new MatchComponent({balanser:'torbox',url:location.origin+'/lite/torbox?title=Fresh',movie:{id:124,title:'Fresh'}});
+            fresh.getChoice=()=>({});fresh.loading=function(){};fresh.initialize();fresh.torboxVoiceUrl(location.origin+'/lite/torbox?title=Fresh')`;
+        assert.equal(new URL(await ev(openFresh)).searchParams.get('tb_order'),'voice');
+        await ev('window.firstDevice=MatchComponent; (function(localStorage){'+component+'window.MatchComponent=component;})();})(sessionStorage)');
+        assert.equal(new URL(await ev(openFresh)).searchParams.get('tb_order'),null);
+        await ev("window.MatchComponent=firstDevice");
+        assert.equal(new URL(await ev(openFresh)).searchParams.get('tb_prefer_voice'),'Studio B');
+        await ev('window.matchFilter=firstFilter');
+        const normal=await setPreference('Порядок на этом устройстве','Обычный');
+        assert.equal(normal.has('tb_order'),false);
+        assert.equal(normal.has('tb_prefer_voice'),false);
+        assert.equal(normal.has('tb_prefer_format'),false);
+        console.log('PASS Online/TorBox device ordering, filter preservation, independent store and reset');
         console.log('PASS Online/TorBox match groups preserve selected filters in both directions');
         await ev(fs.readFileSync(path.join(__dirname,'../../Modules/TorBox/plugin.js'),'utf8').replace('{localhost}',origin));
         await ev(fs.readFileSync(path.join(__dirname,'SeasonWatch/plugin.js'),'utf8').replace('{localhost}',origin));
@@ -139,6 +177,7 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
         await until("Lampa.Activity.active()?.component==='my_torbox'");
         await ev("window.playCalls=[];Lampa.Player.play=function(c){window.lastPlayed=c;playCalls.push(c.url)}; Lampa.Player.playlist=function(list){window.lastPlaylist=list;}");
         await ev("$('[data-action=all_releases]').trigger('hover:enter')");
+        await until("$('.all-releases-card').length===2");
         await until("$('.all-releases-card').length===3");
         assert(await ev("$('.all-releases-source').text().includes('Домашний TorrServer') && $('.all-releases-source').text().includes('h2nexus-p')"));
         const cardEvent = place => "$('.all-releases-card').filter(function(){return $(this).find('.all-releases-source').text().includes('"+place+"');})[0].dispatchEvent(new Event('hover:enter'))";
@@ -171,7 +210,9 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
         const choose=label=>ev("testMenus.at(-1).onSelect(testMenus.at(-1).items.find(x=>x.title==="+JSON.stringify(label)+"))");
         await until("testMenus.at(-1).items.some(x=>x.title==='Подтвердить замену')");
         assert.equal(actions,0);
-        assert(await ev("testMenus.at(-1).items[1].subtitle.includes('Old 1080p') && testMenus.at(-1).items[1].subtitle.includes('S02E03')"));
+        assert(await ev("testMenus.at(-1).items.find(i=>i.title==='Подтвердить замену').subtitle.includes('Old 1080p') && testMenus.at(-1).items.find(i=>i.title==='Подтвердить замену').subtitle.includes('S02E03')"));
+        await choose('Исчезнут · 1');assert(await ev("testMenus.at(-1).items[0].title==='Old.mkv'"));
+        await choose('Old.mkv');assert(await ev("testMenus.at(-1).items.some(i=>i.title==='Сохранить обе версии')"));
         await choose('Отмена');assert.equal(actions,0);
         await choose('Выбрать сериал в TMDB');await choose('Show (2024)');
         for(let i=0;i<30&&!identities;i++)await delay(100);
@@ -193,6 +234,13 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
         for(let i=0;i<30&&!actions;i++)await delay(100);
         if(!actions) console.log(await ev("({notes,active:Lampa.Activity.active()?.component,menus:testMenus.map(x=>x.title),urls:performance.getEntriesByType('resource').filter(x=>x.name.includes('season-watch')).map(x=>new URL(x.name).pathname)})"));
         assert.equal(actions,1);
+        await delay(300);
+        await openCard('h2nexus-p');await choose('Обновить');
+        await until("testMenus.at(-1).items.some(x=>x.title==='Сохранить обе версии')");
+        await choose('Сохранить обе версии');
+        for(let i=0;i<30&&!kept;i++)await delay(100);
+        assert.equal(kept,1);assert.equal(actions,1);assert.equal(deletions.length,0);
+        await delay(300);
         const click=label=>ev("testMenus.at(-1).onSelect(testMenus.at(-1).items.find(x=>x.title==="+JSON.stringify(label)+"))");
         const sites=[['h2nexus-p','peer'],['TorBox','box'],['Домашний','home']];
         infuseMedia=true;

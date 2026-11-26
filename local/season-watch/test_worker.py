@@ -484,6 +484,53 @@ class Tests(unittest.TestCase):
         with patch.object(p,'json_file',return_value={'api_key':'fixture'}),patch('providers.http',return_value=[]):
             with self.assertRaises(Unavailable): p.box('mylist')
 
+    def test_update_previews_changes_and_can_keep_both(self):
+        self.p.rows=[jac(B)]
+        self.p.candidate=[file(2,size=900),file(3)]
+        offer=w.update_release(self.p,self.s,'peer',A,2)
+        self.assertEqual(offer['offer']['files'],dict(added=[file(3)['name']],removed=[file(1)['name']],changed=[file(2)['name']]))
+        with self.assertRaises(Unavailable):
+            w.update_release(self.p,self.s,'peer',A,2,confirmation=offer['keep_confirmation'])
+        self.assertFalse(self.p.writes)
+        w.update_release(self.p,self.s,'peer',A,2,confirmation=offer['keep_confirmation'],keep_both=True)
+        self.assertFalse(self.p.removals)
+        self.assertEqual({c['hash'] for c in w.catalog(self.p,w.state())['cards'] if c['place']=='peer'},{A,B})
+        self.assertFalse(self.s.get('removal_groups'))
+        self.assertFalse(self.s['replaced'])
+
+    def test_preview_must_be_reopened_if_a_file_disappears(self):
+        self.p.rows=[jac(B)]
+        offer=w.update_release(self.p,self.s,'peer',A,2)
+        self.p.candidate=self.p.candidate[1:]
+        with self.assertRaises(Unavailable):
+            w.update_release(self.p,self.s,'peer',A,2,confirmation=offer['confirmation'])
+        self.assertFalse(self.p.writes)
+        self.assertFalse(self.p.removals)
+
+    def test_catalog_deadline_offline_source_and_background_completion(self):
+        import time
+        self.scan()
+        # Keep the good remote snapshot visible while only the other sources return.
+        def complete(place,epoch):
+            if place!='peer':
+                w.atomic(w.snapshot_path(place),dict(epoch=epoch,asof=int(time.time()),attempt=time.time(),
+                    cards=[w.card(t,place) for t in self.p.inventory(place)]))
+        with patch.object(w,'start_inventory_refresh',side_effect=complete) as refresh:
+            start=time.monotonic()
+            partial=w.quick_catalog(self.s)
+            self.assertLess(time.monotonic()-start,1)
+            self.assertEqual(partial['refreshing'],['peer'])
+            self.assertEqual(len(partial['cards']),3)
+            self.assertIn('inventory_asof',next(c for c in partial['cards'] if c['place']=='peer'))
+            self.p.items['peer']=[torrent(B,[file(3)])]
+            w.refresh_inventory(self.p,'peer',0)
+            updated=w.quick_catalog(self.s)
+            self.assertEqual(updated['refreshing'],[])
+            peer=next(c for c in updated['cards'] if c['place']=='peer')
+            self.assertEqual(peer['hash'],B)
+            self.assertNotIn('inventory_asof',peer)
+            self.assertEqual(refresh.call_count,3)
+
     def test_archived_versions_removed_without_requesting_their_files(self):
         self.scan();self.p.rows=[jac(B)]
         self.s['replaced']['peer:'+C]=A

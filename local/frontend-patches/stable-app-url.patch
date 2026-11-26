@@ -1,0 +1,23 @@
+--- a/wwwroot/lampa-main/index.html
++++ b/wwwroot/lampa-main/index.html
+@@ -110,5 +110,5 @@
+
+         function loadCurrentLampa() {
+-            putScript('app.min.js?v=' + cache_version, function () {})
++            putScript('app.min.js', function () {})
+         }
+
+@@ -135,5 +135,5 @@
+
+             putScript(
+-                urlJoin(lampa_url, 'app.min.js?v=' + cache_version),
++                urlJoin(lampa_url, 'app.min.js'),
+                 function () {
+                     var css = urlJoin(lampa_url, 'css/app.css?v=' + cache_version)
+@@ -143,5 +143,5 @@
+                 function () {
+                     putScript(
+-                        urlJoin(lampa_url, 'lampa-main/app.min.js?v=' + cache_version),
++                        urlJoin(lampa_url, 'lampa-main/app.min.js'),
+                         function () {
+                             var css = urlJoin(lampa_url, 'lampa-main/css/app.css?v=' + cache_version)

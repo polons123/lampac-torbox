@@ -286,12 +286,28 @@
     return 'Загрузка ' + p.toFixed(0) + '%' + (t.speed ? ' · ' + size(t.speed) + '/с' : '') + ' · ' + (t.state || 'ожидание');
   }
   function video(f) { return /\.(mkv|mp4|avi|m4v|mov|ts|m2ts|webm|mpg|mpeg|wmv|flv|vob|ogv)$/i.test(f.name || ''); }
-  function play(t, file, back, g) {
+  function playbackProfile() {
+    var permit = Lampa.Account && Lampa.Account.Permit;
+    return keyIdentity() + '|' + ((permit && permit.profile && permit.profile.id) || 0);
+  }
+  function fileTimeline(torrent, file, profile) {
+    if (!torrent.hash || !Lampa.Timeline || !Lampa.Timeline.view) return false;
+    var identity = ['torbox-file', profile, String(torrent.hash).toLowerCase(), file.id];
+    return Lampa.Timeline.view(Lampa.Utils.hash(JSON.stringify(identity)));
+  }
+  window.lampac_torbox_file_timeline = function (hash, fileId) {
+    return fileTimeline({hash: hash}, {id: fileId}, playbackProfile());
+  };
+  function play(t, file, back, g, offered, profile) {
+    if (profile !== playbackProfile()) return;
+    var metrics = window.lampacPlaybackMetrics;
+    var measurement = metrics && metrics.begin(offered);
     Lampa.Noty.show('Получаю ссылку TorBox…');
     request('play', { id: t.id, file: file.id }, function (j) {
-      if (g !== generation) return;
+      if (g !== generation || profile !== playbackProfile()) return;
       // Lampa selects player_torrent when torrent_hash is present.
-      var cell = { url: j.url, title: file.name, timeline: false, torrent_hash: t.hash || ('torbox-' + t.id) };
+      var cell = { url: j.url, title: file.name, timeline: fileTimeline(t, file, profile), torrent_hash: t.hash || ('torbox-' + t.id) };
+      if (measurement) metrics.resolved(measurement, cell);
       Lampa.Player.play(cell);
       Lampa.Player.playlist([cell]);
     }, function () { if (g === generation) back(); });
@@ -379,8 +395,15 @@
       var reopen = function () { item(id, back, g); };
       var actions = [{ title: 'Обновить · ' + escaped(state(t)), run: reopen }];
       if (t.ready && files.length) {
+        var profile = playbackProfile();
+        var metrics = window.lampacPlaybackMetrics;
+        var offered = metrics && metrics.choosing();
         files.forEach(function (f) {
-          actions.push({ title: escaped(f.name), subtitle: size(f.size), torboxFile: f, run: function () { play(t, f, reopen, g); } });
+          var saved = fileTimeline(t, f, profile);
+          var label = size(f.size);
+          if (saved && saved.time > 10 && saved.percent < 90 && Lampa.Storage.field('player_timecode') !== 'again')
+            label += ' · Продолжить с ' + Lampa.Utils.secondsToTime(Math.floor(saved.time));
+          actions.push({ title: escaped(f.name), subtitle: label, torboxFile: f, run: function () { play(t, f, reopen, g, offered, profile); } });
         });
         actions.push({ title: 'Сохранить в Infuse', run: function () { infuseFiles(t, reopen, g); } });
       } else {
@@ -913,7 +936,7 @@
   }
   var activeSeries = null;
   var externalPreparation = false;
-  window.lampac_torbox_series_play = function (response, first, movie) {
+  window.lampac_torbox_series_play = function (response, first, movie, metricToken) {
     if (externalPreparation) return Lampa.Noty.show('Плейлист TorBox ещё подготавливается');
     var info = response.torbox_series;
     if (!info || !info.items || !info.items.length) return;
@@ -1025,6 +1048,7 @@
           activeSeries = null;
           if (info.choice && info.choice.files && info.choice.files.length)
             Lampa.Noty.show('Плейлист остановлен перед серией с несколькими файлами. Выберите файл во внутреннем плеере');
+          if (metricToken && window.lampacPlaybackMetrics) window.lampacPlaybackMetrics.resolved(metricToken, launch);
           Lampa.Player.play(launch);
           Lampa.Player.playlist(playlist);
         }, function () { externalPreparation = false; if (activeSeries === run) activeSeries = null; });
@@ -1033,7 +1057,9 @@
       prepare('');
       return;
     }
-    Lampa.Player.play($.extend({}, selected, { playlist: run.playlist }));
+    var launch = $.extend({}, selected, { playlist: run.playlist });
+    if (metricToken && window.lampacPlaybackMetrics) window.lampacPlaybackMetrics.resolved(metricToken, launch);
+    Lampa.Player.play(launch);
     Lampa.Player.playlist(run.playlist);
     if (response.selection_notice) Lampa.Noty.show(response.selection_notice);
   };

@@ -1,0 +1,119 @@
+--- a/wwwroot/plugins/new_view/new_view.js
++++ b/wwwroot/plugins/new_view/new_view.js
+@@ -2119,7 +2119,7 @@
+     try { Lampa.Storage.set(skey(HERO_DAILY), st, true); } catch (e) {}
+     return picked;
+   }
+-  function heroItems(sec, cb) {
++  function heroItems(sec, cb, background) {
+     var ck = skey(sec), hc = heroCaches[ck];
+     if (hc && hc.day === dayKey() && Date.now() - hc.at < 30 * 60000) return cb(hc.list);
+     var out = [], seen = {};
+@@ -2167,7 +2167,7 @@
+       mine.forEach(function (x, n) { add2(x); if (n % 2 === 0 && nf[i]) add2({ d: nf[i++], watching: false }); });
+       while (nf[i]) add2({ d: nf[i++], watching: false });
+       out.splice(heroMax());
+-      finish();
++      if (background) whenCatalogVisible(finish); else finish();
+     });
+   }
+   var HERO_NEW_N = 4, HERO_NEW_DAYS = 120, HERO_NEW_VOTE = 7.2;
+@@ -2251,25 +2251,49 @@
+   }
+   // a few seconds after the start the three banners are made in the background: the lists, the texts, the
+   // first pictures; opening Home / Movies / Series then finds everything ready
++  var pendingBannerStep = null, warmupProfile = '';
++  function canWarmBanners() {
++    var page = pageNow();
++    return themeOn() && !document.hidden && page && heroSection(page.component, page) &&
++      !(Lampa.Player && Lampa.Player.opened && Lampa.Player.opened());
++  }
++  // Only one background chain exists. Keep its exact continuation while a card or player is active.
++  function whenCatalogVisible(step) {
++    if (warmupProfile !== skey('warmup')) step = heroPrefetch;
++    if (canWarmBanners()) step();
++    else pendingBannerStep = step;
++  }
++  function resumeBannerWarmup() {
++    if (pendingBannerStep && canWarmBanners()) {
++      var step = pendingBannerStep;
++      pendingBannerStep = null;
++      whenCatalogVisible(step);
++    }
++  }
+   function heroPrefetch() {
+-    if (!themeOn()) return;
+-    var secs = ['main', 'movie', 'tv'], n = 0;
+-    (function next() {
+-      var sec = secs[n++];
+-      if (!sec) return;
+-      heroItems(sec, function (list) {
+-        var i = 0;
+-        (function one() {
+-          var it = list[i++];
+-          if (!it) return setTimeout(next, 600);
+-          try {
+-            var im = new Image();
+-            im.src = img(portrait() && it.d.poster_path ? it.d.poster_path : it.d.backdrop_path, tmdbSize(portrait() && it.d.poster_path ? 'poster' : 'backdrop', window.innerWidth));
+-          } catch (e) {}
+-          details(it, function () { setTimeout(one, 300); });
+-        })();
++    warmupProfile = skey('warmup');
++    var sections = ['main', 'movie', 'tv'];
++    function nextSection() {
++      if (!sections.length) return;
++      whenCatalogVisible(function () {
++        heroItems(sections.shift(), function (list) {
++          var index = 0;
++          function nextItem() {
++            if (index === list.length) return setTimeout(nextSection, 600);
++            whenCatalogVisible(function () {
++              var item = list[index++];
++              try {
++                var im = new Image();
++                im.src = img(portrait() && item.d.poster_path ? item.d.poster_path : item.d.backdrop_path, tmdbSize(portrait() && item.d.poster_path ? 'poster' : 'backdrop', window.innerWidth));
++              } catch (e) {}
++              details(item, function () { setTimeout(nextItem, 300); });
++            });
++          }
++          nextItem();
++        }, true);
+       });
+-    })();
++    }
++    nextSection();
+   }
+   function Hero(sec) {
+     sec = sec || 'main';
+@@ -2329,7 +2353,7 @@
+       shownAt = Date.now();
+       // the next slide's picture, ahead of time (after its details: phones take the art without text)
+       var nx = (idx + 1) % items.length;
+-      details(items[nx], function () { if (alive) bg(nx); });
++      if (canWarmBanners()) details(items[nx], function () { if (alive && canWarmBanners()) bg(nx); });
+     }
+     function vis() { return inDoc(el) && $(el).closest('.activity--active').length && !document.hidden; }
+     function tick() {
+@@ -2744,6 +2768,10 @@
+     Lampa.Listener.follow('resize_end', function () { try { apply(); } catch (x) {} });
+     // the banner's dates: a title is stamped when Lampa adds it to history or a bookmark list
+     try { Lampa.Favorite.listener.follow('add,added', function (e) { if (e && HERO_TYPES.indexOf(e.where) >= 0) heroStamp(e.card); }); } catch (x) {}
++    document.addEventListener('visibilitychange', resumeBannerWarmup);
++    if (Lampa.Player && Lampa.Player.listener) Lampa.Player.listener.follow('destroy', function () {
++      setTimeout(resumeBannerWarmup, 0);
++    });
+     setTimeout(function () { try { heroPrefetch(); } catch (x) {} }, 8000);
+     try {
+       Lampa.Listener.follow('torrent_file', function (e) {
+@@ -2764,7 +2792,10 @@
+         homeOrder(e);
+         if (e.type === 'start') sectionCheck(e.component || (e.object && e.object.component), e.object);
+         if (e.type === 'start' || e.type === 'archive') floatHead();
+-        if (e.type === 'start' || e.type === 'archive') pageStateLater();
++        if (e.type === 'start' || e.type === 'archive') {
++          pageStateLater();
++          setTimeout(resumeBannerWarmup, 0);
++        }
+         if (e.type === 'start' && e.component === 'actor' && themeOn()) themePerson(e.object);
+       } catch (x) {}
+     });

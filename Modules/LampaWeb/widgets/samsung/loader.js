@@ -12,7 +12,7 @@ function createScript(src,error){
 }
 
 function startAppWithDeepLink(){
-    createScript('{localhost}/lampa-main/app.min.js?v' + Math.random(), function(){
+    createScript('{localhost}/lampa-main/app.min.js', function(){
         console.log('Protocol https fail');
         
         loadFromLocal()
@@ -34,7 +34,7 @@ function saveToLocal(){
         
     };
 
-    request.open('GET', '{localhost}/lampa-main/app.min.js?v' + Math.random());
+    request.open('GET', '{localhost}/lampa-main/app.min.js');
     request.send();
 }
 
@@ -110,7 +110,7 @@ function countdown() {
     }
     else {
         checkConnection(
-            '{localhost}/lampa-main/app.min.js?v' + Math.random(),
+            '{localhost}/lampa-main/app.min.js',
             function () {
                 clearTimeout(timerId);
 

@@ -1,0 +1,505 @@
+--- a/wwwroot/lampa-main/app.min.js
++++ b/wwwroot/lampa-main/app.min.js
+@@ -16874,12 +16874,26 @@
+     return loadPart;
+   }
+
++  function fullCardStatus(onComplete, onPart) {
++    var status = new Status(9);
++    status.onComplite = onComplete;
++    if (onPart) {
++      status.append = function (name, value) {
++        if (status.stopped) return;
++        status.data[name] = value;
++        status.work++;
++        onPart(name, status.data);
++        status.check();
++      };
++    }
++    return status;
++  }
++
+   function full$4() {
+     var params = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+     var oncomplite = arguments.length > 1 ? arguments[1] : undefined;
+     var onerror = arguments.length > 2 ? arguments[2] : undefined;
+-    var status = new Status(9);
+-    status.onComplite = oncomplite;
++    var status = fullCardStatus(oncomplite, arguments[3]);
+     var image_language = (Storage.field('tmdb_lang') || 'en').split(/[-_]/)[0];
+     var image_languages = [image_language, 'en', 'null'].filter(function (language, index, list) {
+       return list.indexOf(language) == index;
+@@ -16894,7 +16908,8 @@
+         json.imdb_id = json.external_ids.imdb_id;
+       }
+
+-      if (!((_json$overview = json.overview) !== null && _json$overview !== void 0 && _json$overview.trim()) && Storage.field('tmdb_lang') !== 'en') {
++      var needsOverview = !((_json$overview = json.overview) !== null && _json$overview !== void 0 && _json$overview.trim()) && Storage.field('tmdb_lang') !== 'en';
++      if (needsOverview) {
+         get$d(params.method + '/' + params.id, {
+           langs: 'en'
+         }, function (enjson) {
+@@ -16902,8 +16917,11 @@
+
+           if ((_enjson$overview = enjson.overview) !== null && _enjson$overview !== void 0 && _enjson$overview.trim()) json.overview = enjson.overview;
+           status.need--;
+-          status.check();
+-        }, status.error.bind(status), {
++          status.append('movie', json);
++        }, function () {
++          status.need--;
++          status.append('movie', json);
++        }, {
+           life: day$1 * 7
+         });
+       } else status.need--;
+@@ -16926,10 +16944,11 @@
+         });
+       } else status.need--;
+
+-      status.append('movie', json);
++      if (!needsOverview) status.append('movie', json);
+     }, function () {
+-      status.need -= 2;
+-      status.error();
++      status.stop();
++      if (onerror) onerror({ empty: true });
++      else oncomplite({});
+     }, {
+       life: day$1 * 7
+     });
+@@ -40659,8 +40678,7 @@
+   }
+
+   function full$1(params, oncomplite, onerror) {
+-    var status = new Status(9);
+-    status.onComplite = oncomplite;
++    var status = fullCardStatus(oncomplite, arguments[3]);
+     if (Utils$1.dcma(params.method, params.id)) return onerror();
+     var image_language = (Storage.field('tmdb_lang') || 'en').split(/[-_]/)[0];
+     var image_languages = [image_language, 'en', 'null'].filter(function (language, index, list) {
+@@ -40672,7 +40690,8 @@
+       if (json.status_code) return status.stop(), onerror();
+       json.source = 'cub';
+
+-      if (!((_json$overview = json.overview) !== null && _json$overview !== void 0 && _json$overview.trim()) && Storage.field('tmdb_lang') !== 'en') {
++      var needsOverview = !((_json$overview = json.overview) !== null && _json$overview !== void 0 && _json$overview.trim()) && Storage.field('tmdb_lang') !== 'en';
++      if (needsOverview) {
+         TMDB.get(params.method + '/' + params.id, {
+           langs: 'en'
+         }, function (enjson) {
+@@ -40680,8 +40699,11 @@
+
+           if ((_enjson$overview = enjson.overview) !== null && _enjson$overview !== void 0 && _enjson$overview.trim()) json.overview = enjson.overview;
+           status.need--;
+-          status.check();
+-        }, status.error.bind(status), {
++          status.append('movie', json);
++        }, function () {
++          status.need--;
++          status.append('movie', json);
++        }, {
+           life: day * 7
+         });
+       } else status.need--;
+@@ -40704,10 +40726,11 @@
+         });
+       } else status.need--;
+
+-      status.append('movie', json);
++      if (!needsOverview) status.append('movie', json);
+     }, function () {
+-      status.need -= 2;
+-      status.error();
++      status.stop();
++      if (onerror) onerror({ empty: true });
++      else oncomplite({});
+     }, {
+       life: day * 7
+     });
+@@ -41046,7 +41069,7 @@
+     var params = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+     var oncomplite = arguments.length > 1 ? arguments[1] : undefined;
+     var onerror = arguments.length > 2 ? arguments[2] : undefined;
+-    source(params).full(params, oncomplite, onerror);
++    source(params).full(params, oncomplite, onerror, arguments[3]);
+   }
+   /**
+    * Главный поиск
+@@ -43868,6 +43891,16 @@
+       var _this = this;
+
+       var videos = this.data.videos;
++      if (!videos && this.data.loadingCardVideos && !this.data.movie.adult && !window.lampa_settings.disable_features.trailers) {
++        this.html.find('.view--trailer').addClass('hide');
++        this.setCardVideos = function () {
++          this.setCardVideos = null;
++          this.html.find('.view--trailer').removeClass('hide');
++          Trailers.onCreate.call(this);
++          this.emit('groupButtons');
++        };
++        return;
++      }
+
+       if (!this.data.movie.adult && videos && videos.results.length && !window.lampa_settings.disable_features.trailers) {
+         this.html.find('.view--trailer').on('hover:enter', function () {
+@@ -44058,7 +44091,11 @@
+       var _this = this;
+
+       if (!Storage.field('card_interfice_reactions') || window.lampa_settings.disable_features.reactions) return this.html.find('.full-start-new__reactions, .button--reaction').remove();
+-      var reactions_data = this.data.reactions;
++      var reactions_data = this.data.reactions || { result: [] };
++      this.setCardReactions = function (value) {
++        reactions_data = value;
++        draw();
++      };
+
+       var vote = function vote(type) {
+         var add = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : false;
+@@ -44084,6 +44121,7 @@
+           reactions.sort(function (a, b) {
+             return a.counter > b.counter ? -1 : a.counter < b.counter ? 1 : 0;
+           });
++          if (!reactions_body) return;
+           reactions_body.empty();
+           reactions.forEach(function (r) {
+             var reaction = document.createElement('div'),
+@@ -45505,7 +45543,121 @@
+         cub_button: true
+       }
+     });
++    var destroyed = false;
++    var opened = false;
++    var allowed = false;
++    var adult_block;
++
++    function addSections(rows, data) {
++      if (data.metadata && data.metadata.status && data.metadata.status == 'completed') {
++        rows.push(['metadata_chart', {
++          movie: data.movie,
++          metadata: data.metadata
++        }]);
++
++        if (Lang.selected(['ru', 'uk', 'be'])) {
++          rows.push(['metadata_tags', {
++            movie: data.movie,
++            metadata: data.metadata
++          }]);
++        }
++      } // Создаем эпизоды
++
++
++      if (!adult_block && data.episodes && data.episodes.episodes) {
++        var episodes = data.episodes.episodes; // Если сериал многосезонный, то выбираем нужный сезон
++
++        if (data.episodes.seasons_count && data.episodes.seasons_count > 1 && data.episodes.episodes_original) {
++          // Парсим эпизоды по сезонам
++          var seasons = Utils$1.splitEpisodesIntoSeasons(data.episodes.episodes_original); // Выбираем нужный сезон
++
++          episodes = seasons[data.episodes.seasons_count] || seasons[1]; // Сохраняем номер сезона
++
++          data.episodes.name = Lang.translate('torrent_serial_season') + ' ' + data.episodes.seasons_count;
++        }
++
++        var today = new Date();
++        var date = [today.getFullYear(), today.getMonth() + 1, today.getDate()].join('-');
++        var time = Utils$1.parseToDate(date).getTime();
++        var cameout = episodes.filter(function (a) {
++          return a.air_date;
++        }).filter(function (e) {
++          return Utils$1.parseToDate(e.air_date).getTime() <= time;
++        });
++        var comeing = episodes.filter(function (a) {
++          return a.air_date;
++        }).filter(function (e) {
++          return Utils$1.parseToDate(e.air_date).getTime() > time;
++        });
++        comeing.forEach(function (e) {
++          return e.comeing = true;
++        });
++        if (comeing.length) cameout = cameout.concat(comeing.slice(0, 1));
++        cameout.forEach(function (episode) {
++          return episode.original_name = data.movie.original_name || data.movie.name;
++        });
++
++        rows.push(['episodes', {
++          movie: data.movie,
++          title: data.episodes.name || Lang.translate('full_series_release'),
++          results: cameout
++        }]);
++      } // Создаем режиссеров
++
++
++      if (!adult_block && data.persons && data.persons.crew && data.persons.crew.length) {
++        var directors = data.persons.crew.filter(function (member) {
++          return member.job === 'Director';
++        });
++        directors.length && rows.push(['persons', {
++          results: directors,
++          title: Lang.translate('title_producer')
++        }]);
++      } // Создаем актеров
++
++
++      if (!adult_block && data.persons && data.persons.cast && data.persons.cast.length) rows.push(['persons', {
++        results: data.persons.cast,
++        title: Lang.translate('title_actors')
++      }]); // Создаем отзывы
++
++      if (!adult_block && data.discuss) Arrays.insert(rows, data.discuss.result.length ? 2 : rows.length, ['discuss', _objectSpread2(_objectSpread2({}, data.discuss), {}, {
++        movie: data.movie,
++        title: Lang.translate('title_comments'),
++        results: data.discuss.result || []
++      })]); // Создаем коллекцию
++
++      if (!adult_block && data.collection && data.collection.results && data.collection.results.length) {
++        data.collection.title = Lang.translate('title_collection'); // Сортируем по году от меньшего к большему
++
++        data.collection.results.sort(function (a, b) {
++          var yearA = a.release_date ? a.release_date.split('-')[0] : a.first_air_date ? a.first_air_date.split('-')[0] : '0';
++          var yearB = b.release_date ? b.release_date.split('-')[0] : b.first_air_date ? b.first_air_date.split('-')[0] : '0';
++          return parseInt(yearA) - parseInt(yearB);
++        });
++
++        rows.push(['cards', data.collection]);
++      } // Создаем рекомендации
++
++
++      if (!adult_block && data.recomend && data.recomend.results && data.recomend.results.length) {
++        data.recomend.title = Lang.translate('title_recomendations');
++
++        rows.push(['cards', data.recomend]);
++      } // Создаем похожие
++
++
++      if (!adult_block && data.simular && data.simular.results && data.simular.results.length) {
++        data.simular.title = Lang.translate('title_similar');
++
++        rows.push(['cards', data.simular]);
++      }
++    }
++
+     comp.use({
++      onDestroy: function () {
++        destroyed = true;
++      },
+       onCreate: function onCreate() {
+         var _this = this;
+
+@@ -45513,7 +45665,9 @@
+         this.view = 3;
+         this.rows = ['start', 'description'];
+         this.html.addClass('layer--wheight');
+-        Api.full(object, function (data) {
++        function openCard(data) {
++          if (destroyed || opened) return;
++          opened = true;
+           if (!data.movie) return _this.emit('error', {
+             empty: true
+           }); // Добавляем в пропсы данные
+@@ -45546,7 +45700,7 @@
+
+           var watch = Utils$1.canWatchChildren(TMDB.parsePG(data.movie), permit.profile.age); // Ищем по ключевым словам, есть ли в фильме тематика для взрослых
+
+-          var adult_block = key_tags && key_tags.find && key_tags.length ? key_tags.find(function (key) {
++          adult_block = key_tags && key_tags.find && key_tags.length ? key_tags.find(function (key) {
+             return Keys.adult.find(function (word) {
+               return key.name.toLowerCase().indexOf(word) >= 0;
+             });
+@@ -45564,109 +45718,8 @@
+             data: data
+           });
+
+-          if (data.metadata && data.metadata && data.metadata.status && data.metadata.status == 'completed') {
+-            _this.rows.push(['metadata_chart', {
+-              movie: data.movie,
+-              metadata: data.metadata
+-            }]);
+-
+-            if (Lang.selected(['ru', 'uk', 'be'])) {
+-              _this.rows.push(['metadata_tags', {
+-                movie: data.movie,
+-                metadata: data.metadata
+-              }]);
+-            }
+-          } // Создаем эпизоды
+-
+-
+-          if (!adult_block && data.episodes && data.episodes.episodes) {
+-            var episodes = data.episodes.episodes; // Если сериал многосезонный, то выбираем нужный сезон
+-
+-            if (data.episodes.seasons_count && data.episodes.seasons_count > 1 && data.episodes.episodes_original) {
+-              // Парсим эпизоды по сезонам
+-              var seasons = Utils$1.splitEpisodesIntoSeasons(data.episodes.episodes_original); // Выбираем нужный сезон
+-
+-              episodes = seasons[data.episodes.seasons_count] || seasons[1]; // Сохраняем номер сезона
+-
+-              data.episodes.name = Lang.translate('torrent_serial_season') + ' ' + data.episodes.seasons_count;
+-            }
+-
+-            var today = new Date();
+-            var date = [today.getFullYear(), today.getMonth() + 1, today.getDate()].join('-');
+-            var time = Utils$1.parseToDate(date).getTime();
+-            var cameout = episodes.filter(function (a) {
+-              return a.air_date;
+-            }).filter(function (e) {
+-              return Utils$1.parseToDate(e.air_date).getTime() <= time;
+-            });
+-            var comeing = episodes.filter(function (a) {
+-              return a.air_date;
+-            }).filter(function (e) {
+-              return Utils$1.parseToDate(e.air_date).getTime() > time;
+-            });
+-            comeing.forEach(function (e) {
+-              return e.comeing = true;
+-            });
+-            if (comeing.length) cameout = cameout.concat(comeing.slice(0, 1));
+-            cameout.forEach(function (episode) {
+-              return episode.original_name = data.movie.original_name || data.movie.name;
+-            });
+-
+-            _this.rows.push(['episodes', {
+-              movie: data.movie,
+-              title: data.episodes.name || Lang.translate('full_series_release'),
+-              results: cameout
+-            }]);
+-          } // Создаем режиссеров
+-
+-
+-          if (!adult_block && data.persons && data.persons.crew && data.persons.crew.length) {
+-            var directors = data.persons.crew.filter(function (member) {
+-              return member.job === 'Director';
+-            });
+-            directors.length && _this.rows.push(['persons', {
+-              results: directors,
+-              title: Lang.translate('title_producer')
+-            }]);
+-          } // Создаем актеров
+-
+-
+-          if (!adult_block && data.persons && data.persons.cast && data.persons.cast.length) _this.rows.push(['persons', {
+-            results: data.persons.cast,
+-            title: Lang.translate('title_actors')
+-          }]); // Создаем отзывы
+-
+-          if (!adult_block && data.discuss) Arrays.insert(_this.rows, data.discuss.result.length ? 2 : _this.rows.length, ['discuss', _objectSpread2(_objectSpread2({}, data.discuss), {}, {
+-            movie: data.movie,
+-            title: Lang.translate('title_comments'),
+-            results: data.discuss.result || []
+-          })]); // Создаем коллекцию
+-
+-          if (!adult_block && data.collection && data.collection.results && data.collection.results.length) {
+-            data.collection.title = Lang.translate('title_collection'); // Сортируем по году от меньшего к большему
+-
+-            data.collection.results.sort(function (a, b) {
+-              var yearA = a.release_date ? a.release_date.split('-')[0] : a.first_air_date ? a.first_air_date.split('-')[0] : '0';
+-              var yearB = b.release_date ? b.release_date.split('-')[0] : b.first_air_date ? b.first_air_date.split('-')[0] : '0';
+-              return parseInt(yearA) - parseInt(yearB);
+-            });
+-
+-            _this.rows.push(['cards', data.collection]);
+-          } // Создаем рекомендации
+-
+-
+-          if (!adult_block && data.recomend && data.recomend.results && data.recomend.results.length) {
+-            data.recomend.title = Lang.translate('title_recomendations');
+-
+-            _this.rows.push(['cards', data.recomend]);
+-          } // Создаем похожие
+-
+-
+-          if (!adult_block && data.simular && data.simular.results && data.simular.results.length) {
+-            data.simular.title = Lang.translate('title_similar');
+-
+-            _this.rows.push(['cards', data.simular]);
+-          } // Добавляем картинку для фона
++          allowed = watch;
++          addSections(_this.rows, data); // Добавляем картинку для фона
+
+
+           _this.html.prepend(Template.elem('img', {
+@@ -45712,7 +45765,44 @@
+               season: season
+             });
+           }
+-        }, this.emit.bind(this, 'error'));
++        }
++
++        function received(name, data) {
++          if (destroyed || !data.movie) return;
++          if (!opened) {
++            // Keep the standard restricted-profile flow until the complete response.
++            if (!Utils$1.canWatchChildren(TMDB.parsePG(data.movie), permit.profile.age)) return;
++            _this.props.set('loadingCardVideos', !permit.child && !data.videos);
++            openCard(data);
++            return;
++          }
++          if (!allowed) return;
++          _this.props.set(name, data[name]);
++          var header = _this.items[0];
++          if (name === 'videos') {
++            _this.props.set('loadingCardVideos', false);
++            if (header && header.setCardVideos) header.setCardVideos();
++          } else if (name === 'reactions') {
++            if (header && header.setCardReactions) header.setCardReactions(data[name]);
++          } else {
++            // New View filters comments during its initial build when this preference is set.
++            if (name === 'discuss' && document.body.classList.contains('stv-react')) return;
++            var section = { movie: data.movie };
++            section[name] = data[name];
++            var extra = [];
++            addSections(extra, section);
++            if (extra.length) {
++              Array.prototype.push.apply(_this.rows, extra);
++              _this.appendReadyRows();
++            }
++          }
++        }
++
++        Api.full(object, openCard, function (status) {
++          if (destroyed || opened) return;
++          opened = true;
++          _this.emit('error', status || { empty: true });
++        }, received);
+       },
+       onBuild: function onBuild() {
+         this.scroll.onScroll = this.emit.bind(this, 'scroll'); // Для планшетов в вертикальном режиме принудительно вызываем скролл
+@@ -45725,17 +45815,8 @@
+       onScroll: function onScroll(position) {
+         var _this$html$find;
+
+-        var size = this.tv ? Math.min(this.active + this.view, this.rows.length) : this.rows.length;
+-        var add = this.rows.slice(this.items.length, size);
+-
+-        if (add.length) {
+-          this.fragment = document.createDocumentFragment();
+-          add.forEach(this.emit.bind(this, 'createAndAppend'));
+-          this.scroll.append(this.fragment);
+-        }
+-
++        this.appendReadyRows();
+         (_this$html$find = this.html.find('.full-start__background')) === null || _this$html$find === void 0 ? void 0 : _this$html$find.toggleClass('dim', position > 0);
+-        Layer.visible(this.scroll.render());
+       },
+       onCreateAndAppend: function onCreateAndAppend(component) {
+         var name = Arrays.isArray(component) ? component[0] : component;
+@@ -45779,6 +45860,19 @@
+       }
+     }); // Переопределяем билд
+
++    comp.appendReadyRows = function () {
++      var size = this.tv ? Math.min(this.active + this.view, this.rows.length) : this.rows.length;
++      var add = this.rows.slice(this.items.length, size);
++
++      if (add.length) {
++        this.fragment = document.createDocumentFragment();
++        add.forEach(this.emit.bind(this, 'createAndAppend'));
++        this.scroll.append(this.fragment);
++      }
++
++      Layer.visible(this.scroll.render());
++    };
++
+     comp.build = function (data) {
+       this.emit('build', data);
+     };

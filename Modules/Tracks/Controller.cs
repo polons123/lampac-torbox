@@ -18,6 +18,8 @@ public class TracksController : BaseController
 {
     // ponytail: 64 permanent stripes bound memory; collisions serialize unrelated probes.
     static readonly SemaphoreSlim[] ffprobeGates = Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
+    // Reads of cached metadata never consume a process slot.
+    static readonly SemaphoreSlim probeProcesses = new(Math.Min(2, Environment.ProcessorCount));
     static readonly System.Net.Http.HttpClient statHttp = FriendlyHttp.MessageClient("base", null, out _);
 
     [HttpGet, AllowAnonymous]
@@ -79,126 +81,131 @@ public class TracksController : BaseController
                 return ContentTo(showerror ? "media" : "{}");
         }
 
-        string argumentList = string.Empty;
+        if (media.Contains("/stream/"))
+        {
+            magnethash = Regex.Match(media, "link=([a-z0-9]+)").Groups[1].Value;
+            string index = Regex.Match(media, @"index=([0-9]+)", RegexOptions.IgnoreCase).Groups[1].Value;
 
+            if (!string.IsNullOrWhiteSpace(magnethash))
+                magnethash = $"{magnethash}_{index}";
+        }
+        else if (media.Contains("/lite/pidtor/"))
+        {
+            magnethash = Regex.Match(media, "/lite/pidtor/s([a-z0-9]+)").Groups[1].Value;
+            string index = Regex.Match(media, @"tsid=([0-9]+)", RegexOptions.IgnoreCase).Groups[1].Value;
+
+            if (!string.IsNullOrWhiteSpace(magnethash))
+                magnethash = $"{magnethash}_{index}";
+        }
+
+        if (string.IsNullOrEmpty(magnethash))
+            magnethash = media;
+
+        // A cache key must never remain a user-controlled filesystem path.
+        magnethash = CrypTo.md5(magnethash);
+
+        string cachePath = $"database/tracks/{magnethash}";
         string memKey = $"tracks:ffprobe:{media}";
-        string outPut = null;
+        async Task<string> Cached()
+        {
+            if (hybridCache.TryGetValue(memKey, out string cached))
+                return cached ?? string.Empty;
+            if (System.IO.File.Exists(cachePath))
+            {
+                var disk = await BrotliTo.DecompressAsync(cachePath);
+                if (!string.IsNullOrWhiteSpace(disk)) return disk;
+            }
+            return null;
+        }
+
+        string outPut = await Cached();
+        if (outPut != null) return ContentTo(string.IsNullOrEmpty(outPut) ? "{}" : outPut);
+
+        string argumentList = string.Empty;
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
         budget.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(ModInit.conf.ffprobe_timeout_seconds, 1, 120)));
-        var gate = ffprobeGates[(StringComparer.Ordinal.GetHashCode(memKey) & int.MaxValue) % ffprobeGates.Length];
+        var gate = ffprobeGates[(StringComparer.Ordinal.GetHashCode(magnethash) & int.MaxValue) % ffprobeGates.Length];
         try { await gate.WaitAsync(budget.Token); }
         catch (OperationCanceledException) { return StatusCode(HttpContext.RequestAborted.IsCancellationRequested ? 499 : 504, "{}"); }
         try
         {
-            if (!hybridCache.TryGetValue(memKey, out outPut))
+            outPut = await Cached();
+            if (outPut != null) return ContentTo(string.IsNullOrEmpty(outPut) ? "{}" : outPut);
+
+            if (!Uri.TryCreate(media, UriKind.Absolute, out var uri) ||
+                (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+                return ContentTo(showerror ? "uri" : "{}");
+
+            // retry quick failures (transient TorrServer 5xx): up to 3 attempts, 500ms/1000ms backoff;
+            // a slow empty result (dead torrent) is not retried
+            for (int attempt = 1; attempt <= 3; attempt++)
             {
-                #region getFolder
-                static string getFolder(string magnethash)
+                using var process = new System.Diagnostics.Process();
+                process.StartInfo.UseShellExecute = false;
+                process.StartInfo.RedirectStandardOutput = true;
+                process.StartInfo.RedirectStandardError = true;
+                process.StartInfo.StandardOutputEncoding = Encoding.UTF8;
+                process.StartInfo.FileName = CoreInit.Win32NT ? "data/ffprobe.exe" : System.IO.File.Exists("data/ffprobe") ? "data/ffprobe" : "ffprobe";
+
+                process.StartInfo.ArgumentList.Add("-v");
+                process.StartInfo.ArgumentList.Add("quiet");
+                process.StartInfo.ArgumentList.Add("-print_format");
+                process.StartInfo.ArgumentList.Add("json");
+                process.StartInfo.ArgumentList.Add("-show_format");
+                process.StartInfo.ArgumentList.Add("-show_streams");
+                process.StartInfo.ArgumentList.Add(AccsDbInvk.Args(uri.AbsoluteUri, HttpContext));
+
+                argumentList = process.StartInfo.FileName + " " + string.Join(" ", process.StartInfo.ArgumentList);
+
+                await probeProcesses.WaitAsync(budget.Token);
+                var started = DateTime.UtcNow;
+                try
                 {
-                    return $"database/tracks/{magnethash}";
-                }
-                #endregion
+                    process.Start();
 
-                if (media.Contains("/stream/"))
-                {
-                    magnethash = Regex.Match(media, "link=([a-z0-9]+)").Groups[1].Value;
-                    string index = Regex.Match(media, @"index=([0-9]+)", RegexOptions.IgnoreCase).Groups[1].Value;
-
-                    if (!string.IsNullOrWhiteSpace(magnethash))
-                        magnethash = $"{magnethash}_{index}";
-                }
-                else if (media.Contains("/lite/pidtor/"))
-                {
-                    magnethash = Regex.Match(media, "/lite/pidtor/s([a-z0-9]+)").Groups[1].Value;
-                    string index = Regex.Match(media, @"tsid=([0-9]+)", RegexOptions.IgnoreCase).Groups[1].Value;
-
-                    if (!string.IsNullOrWhiteSpace(magnethash))
-                        magnethash = $"{magnethash}_{index}";
-                }
-
-                if (string.IsNullOrEmpty(magnethash))
-                    magnethash = media;
-
-                // A cache key must never remain a user-controlled filesystem path.
-                magnethash = CrypTo.md5(magnethash);
-
-                if (System.IO.File.Exists(getFolder(magnethash)))
-                    outPut = await BrotliTo.DecompressAsync(getFolder(magnethash));
-
-                if (string.IsNullOrWhiteSpace(outPut))
-                {
-                    if (!Uri.TryCreate(media, UriKind.Absolute, out var uri) ||
-                        (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
-                        return ContentTo(showerror ? "uri" : "{}");
-
-                    // retry quick failures (transient TorrServer 5xx): up to 3 attempts, 500ms/1000ms backoff;
-                    // a slow empty result (dead torrent) is not retried
-                    for (int attempt = 1; attempt <= 3; attempt++)
+                    try
                     {
-                        var started = DateTime.UtcNow;
-                        using var process = new System.Diagnostics.Process();
-                        process.StartInfo.UseShellExecute = false;
-                        process.StartInfo.RedirectStandardOutput = true;
-                        process.StartInfo.RedirectStandardError = true;
-                        process.StartInfo.StandardOutputEncoding = Encoding.UTF8;
-                        process.StartInfo.FileName = CoreInit.Win32NT ? "data/ffprobe.exe" : System.IO.File.Exists("data/ffprobe") ? "data/ffprobe" : "ffprobe";
-
-                        process.StartInfo.ArgumentList.Add("-v");
-                        process.StartInfo.ArgumentList.Add("quiet");
-                        process.StartInfo.ArgumentList.Add("-print_format");
-                        process.StartInfo.ArgumentList.Add("json");
-                        process.StartInfo.ArgumentList.Add("-show_format");
-                        process.StartInfo.ArgumentList.Add("-show_streams");
-                        process.StartInfo.ArgumentList.Add(AccsDbInvk.Args(uri.AbsoluteUri, HttpContext));
-
-                        argumentList = process.StartInfo.FileName + " " + string.Join(" ", process.StartInfo.ArgumentList);
-
-                        process.Start();
-
-                        try
+                        var stdout = process.StandardOutput.ReadToEndAsync(budget.Token);
+                        var stderr = process.StandardError.ReadToEndAsync(budget.Token);
+                        await Task.WhenAll(stdout, stderr, process.WaitForExitAsync(budget.Token));
+                        outPut = await stdout;
+                    }
+                    catch
+                    {
+                        if (!process.HasExited)
                         {
-                            var stdout = process.StandardOutput.ReadToEndAsync(budget.Token);
-                            var stderr = process.StandardError.ReadToEndAsync(budget.Token);
-                            await Task.WhenAll(stdout, stderr, process.WaitForExitAsync(budget.Token));
-                            outPut = await stdout;
+                            try { process.Kill(entireProcessTree: true); }
+                            catch (InvalidOperationException) { }
+                            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
                         }
-                        catch
-                        {
-                            if (!process.HasExited)
-                            {
-                                try { process.Kill(entireProcessTree: true); }
-                                catch (InvalidOperationException) { }
-                                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
-                            }
-                            throw;
-                        }
-
-                        if (!string.IsNullOrWhiteSpace(outPut) && Regex.Replace(outPut, "[\n\r\t ]+", "") != "{}")
-                            break;
-
-                        if (attempt == 3 || (DateTime.UtcNow - started).TotalSeconds > 5)
-                            break;
-
-                        await Task.Delay(500 * attempt, budget.Token);
-                    }
-
-                    if (outPut == null)
-                        outPut = string.Empty;
-
-                    if (Regex.Replace(outPut, "[\n\r\t ]+", "") == "{}")
-                        outPut = string.Empty;
-
-                    if (!string.IsNullOrWhiteSpace(outPut) && !string.IsNullOrWhiteSpace(magnethash))
-                    {
-                        await BrotliTo.CompressAsync(getFolder(magnethash), outPut);
-                    }
-                    else
-                    {
-                        // заглушка
-                        hybridCache.Set(memKey, outPut, DateTime.Now.AddMinutes(5), inmemory: true);
+                        throw;
                     }
                 }
+                finally { probeProcesses.Release(); }
+
+                if (!string.IsNullOrWhiteSpace(outPut) && Regex.Replace(outPut, "[\n\r\t ]+", "") != "{}")
+                    break;
+
+                if (attempt == 3 || (DateTime.UtcNow - started).TotalSeconds > 5)
+                    break;
+
+                await Task.Delay(500 * attempt, budget.Token);
             }
+
+            if (outPut == null)
+                outPut = string.Empty;
+
+            if (Regex.Replace(outPut, "[\n\r\t ]+", "") == "{}")
+                outPut = string.Empty;
+
+            if (!string.IsNullOrWhiteSpace(outPut))
+            {
+                // Publish complete files to readers that bypass the cold-probe gate.
+                string pendingPath = cachePath + ".tmp";
+                await BrotliTo.CompressAsync(pendingPath, outPut);
+                if (System.IO.File.Exists(pendingPath)) System.IO.File.Move(pendingPath, cachePath, true);
+            }
+            else hybridCache.Set(memKey, outPut, DateTime.Now.AddMinutes(5), inmemory: true);
         }
         catch (OperationCanceledException)
         {

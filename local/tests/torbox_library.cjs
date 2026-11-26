@@ -116,3 +116,42 @@ complete(again, [row(3, 'Three')], false);
 assert.deepEqual(current.built.results.map((r) => r.title), ['Three']);
 assert(source.includes('cursor + 8'));
 console.log('PASS library filter keeps its own request and resets the page');
+
+const direct = source.slice(source.indexOf('  function playbackProfile()'), source.indexOf('  var infuseJob'));
+const progress = new Map(), cells = [], directRequests = [];
+let activeProfile = 1, signedLink = 0;
+const directCtx = {
+  Lampa: {
+    Account: {Permit: {get profile() {return {id:activeProfile};}}},
+    Timeline: {view(hash) {
+      return {hash, time:progress.get(hash)||0, handler(_,time) {progress.set(hash,time);}};
+    }},
+    Utils: {hash(v) {return v;}},
+    Player: {play(cell) {cells.push(cell);},playlist(list) {assert.strictEqual(list[0],cells.at(-1));}},
+    Noty: {show() {}}
+  },
+  window: {},generation:1,keyIdentity:()=>'fixture-account',
+  request(path,args,done) {assert.equal(path,'play');directRequests.push(()=>done({url:'https://cdn.example/'+(++signedLink)}));}
+};
+vm.createContext(directCtx);
+vm.runInContext(direct, directCtx);
+const torrent = {hash:'abcdef',id:10}, file={name:'film.mkv',id:0};
+function launch(f=file) {
+  directCtx.play(torrent,f,()=>{},1,null,directCtx.playbackProfile());
+  directRequests.shift()();
+  return cells.at(-1);
+}
+const startCell=launch();
+startCell.timeline.handler(50,2537);
+assert.equal(launch().timeline.time,2537);
+assert.notEqual(cells.at(-1).url,startCell.url);
+assert.equal(directCtx.window.lampac_torbox_file_timeline('abcdef',0).hash,startCell.timeline.hash);
+assert.equal(launch({id:1,name:'other.mkv'}).timeline.time,0);
+activeProfile=2;
+assert.equal(launch().timeline.time,0);
+const count=cells.length;
+directCtx.play(torrent,file,()=>{},1,null,directCtx.playbackProfile());
+activeProfile=3;
+directRequests.shift()();
+assert.equal(cells.length,count);
+console.log('PASS direct-file progress survives renewed links and isolates files and profiles');

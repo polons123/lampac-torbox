@@ -40,7 +40,7 @@ function createScript(src,error){
 }
 
 function startAppWithDeepLink(){
-    createScript(urlJoin(lampac_url, 'app.min.js?v' + cache_version), function(){
+    createScript(urlJoin(lampac_url, 'app.min.js'), function(){
         console.log('app.min.js fail');
 
         loadFromLocal()
@@ -69,7 +69,7 @@ function saveToLocal(){
 
     };
 
-    request.open('GET', urlJoin(lampac_url, 'app.min.js?v' + cache_version));
+    request.open('GET', urlJoin(lampac_url, 'app.min.js'));
     request.send();
 }
 
@@ -141,7 +141,7 @@ function countdown() {
     }
     else {
         checkConnection(
-            urlJoin(lampac_url, 'app.min.js?v' + cache_version),
+            urlJoin(lampac_url, 'app.min.js'),
             function () {
                 if(!app_loaded){
                     app_loaded = true

@@ -341,6 +341,17 @@
             Lampa.Select.close();
             _this.reset();
             _this.request(filteredUrl);
+          } else if (a.stype && a.stype.indexOf('tb_preference_')===0 && torboxVoiceMenu) {
+            var pref=deviceOrder();
+            var key=a.stype.slice('tb_preference_'.length);
+            pref[key]=b.value;
+            if (key!=='order' && b.value && !pref.order) pref.order=key==='voice'?'voice':'format';
+            try { localStorage.setItem(orderKey(),JSON.stringify(pref)); }
+            catch (e) { Lampa.Noty.show('Не удалось сохранить порядок на устройстве'); return; }
+            var orderedUrl=_this.torboxVoiceUrl(torboxVoiceMenu.search);
+            Lampa.Select.close();
+            _this.reset();
+            _this.request(orderedUrl);
           } else if (a.stype === 'torbox_match_group' && torboxVoiceMenu) {
             var groupUrl = _this.torboxVoiceUrl(torboxVoiceMenu.search).replace(/([?&])tb_possible=(true|false)/, '$1tb_possible=' + b.value);
             Lampa.Select.close();
@@ -840,8 +851,12 @@
           return a.season - b.season || a.episode - b.episode;
         });
       }
+      var metrics = window.lampacPlaybackMetrics;
+      var offered = metrics && metrics.choosing();
       this.draw(videos, {
         onEnter: function onEnter(item, html) {
+          var timing = metrics && metrics.begin(offered);
+          offered = null;
           _this5.getFileUrl(
             item,
             function (json, json_call) {
@@ -865,7 +880,7 @@
                   first.vast_screen = json.vast.screen;
                 }
                 if (json_call.torbox_series && window.lampac_torbox_series_play) {
-                  window.lampac_torbox_series_play(json_call, first, object.movie);
+                  window.lampac_torbox_series_play(json_call, first, object.movie, timing);
                   item.mark();
                   _this5.updateBalanser(balanser);
                   return;
@@ -924,6 +939,7 @@
                   var element = first;
                   element.isonline = true;
                   {player-inner}
+                  if (metrics) metrics.resolved(timing, element);
                   Lampa.Player.play(element);
                   Lampa.Player.playlist(playlist);
                   if (element.subtitles_call) _this5.loadSubtitles(element.subtitles_call);
@@ -1107,6 +1123,14 @@
       }
     };
     var torboxFilterTitles = { res: 'Разрешение', hdr: 'HDR / Dolby Vision', codec: 'Кодек', size: 'Размер раздачи' };
+    function orderKey() {
+      var profile=Lampa.Account && Lampa.Account.Permit && Lampa.Account.Permit.profile;
+      return 'torbox_device_order_' + Lampa.Utils.hash(location.host+'|'+(profile && profile.id || '')+'|'+Lampa.Storage.get('account_email',''));
+    }
+    function deviceOrder() {
+      try { return JSON.parse(localStorage.getItem(orderKey())||'{}') || {}; }
+      catch (e) { return {}; }
+    }
     this.torboxFilterUrl = function (url) {
       if (balanser !== 'torbox' || !/\/lite\/torbox(?:\?|$)/.test(String(url))) return url;
       var choice = this.getChoice('torbox');
@@ -1115,6 +1139,13 @@
         var pattern = new RegExp('([?&])' + name + '=[^&]*');
         url = pattern.test(url) ? url.replace(pattern, '$1' + name + '=' + value) : Lampa.Utils.addUrlComponent(url, name + '=' + value);
       });
+      var pref=deviceOrder();
+      url=url.replace(/([?&])tb_(order|prefer_format|prefer_voice)=[^&]*/g,'$1').replace(/\?&+/,'?').replace(/&&+/g,'&').replace(/[?&]$/,'');
+      if (pref.order) {
+        [['tb_order',pref.order],['tb_prefer_format',pref.format],['tb_prefer_voice',pref.voice]].forEach(function (pair) {
+          if (pair[1]) url=Lampa.Utils.addUrlComponent(url,pair[0]+'='+encodeURIComponent(pair[1]));
+        });
+      }
       return url;
     };
     this.torboxEpisodeUrl = function (url, season, episode) {
@@ -1431,6 +1462,23 @@
         var possible = /[?&]tb_possible=true(?:&|$)/.test(torboxVoiceMenu.search);
         select.push({ title: 'Совпадения', subtitle: possible ? 'Возможные совпадения' : 'Точные совпадения', stype: 'torbox_match_group',
           items: [{ title: 'Точные совпадения', value: 'false', selected: !possible }, { title: 'Возможные совпадения', value: 'true', selected: possible }] });
+        var pref=deviceOrder();
+        function preference(key,title,options) {
+          var value=pref[key]||'';
+          if (value && !options.some(function (o) {return o[0]===value;})) options.push([value,value]);
+          var items=options.map(function (o) {return {title:escapeHtml(o[1]),value:o[0],selected:value===o[0]};});
+          select.push({title:title,subtitle:items.filter(function (o) {return o.selected;})[0].title,
+            stype:'tb_preference_'+key,items:items});
+        }
+        preference('order','Порядок на этом устройстве',[['','Обычный'],['ready','Сначала готовые'],['format','Сначала предпочитаемый формат'],['voice','Сначала предпочитаемая озвучка']]);
+        var formats=[['','Любой']];
+        ['res','hdr','codec'].forEach(function (key) {
+          (torboxVoiceMenu.filterOptions[key]||[]).forEach(function (v) {
+            if(v!=='Не указано') formats.push([key+':'+v,v]);
+          });
+        });
+        preference('format','Предпочитаемый формат',formats);
+        preference('voice','Предпочитаемая озвучка',[['','Любая']].concat(torboxVoiceMenu.options.map(function (v) {return [v,v];})));
         var voiceOptions = [{ title: 'Все', voice: '', selected: !torboxVoiceMenu.selected }];
         torboxVoiceMenu.options.forEach(function (name) { voiceOptions.push({ title: escapeHtml(name), voice: name, selected: torboxVoiceMenu.selected === name }); });
         select.push({ title: 'Озвучка', subtitle: escapeHtml(torboxVoiceMenu.selected || 'Все'), items: voiceOptions, stype: 'torbox_voice' });

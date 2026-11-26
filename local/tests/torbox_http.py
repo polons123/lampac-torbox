@@ -58,6 +58,7 @@ private = {"api_key": "fixture-key", "allowed_uids": [uid, second], "allow_exter
 (p / "torbox-private.json").write_text(json.dumps(private))
 os.chmod(p / "torbox-private.json", 0o600)
 (p / "mods" / "TorBox" / "Test.cs").write_text("""using Microsoft.AspNetCore.Mvc;using System;namespace TorBox;public partial class TorBoxController {
+[HttpGet,Route("test/search-waiters")]public ActionResult Waiters(){lock(searchCacheGate){int total=0;foreach(var f in searches.Values)total+=f.Waiters;return Payload(new{total});}}
 [HttpGet,Route("test/reset")]public ActionResult Reset(){lock(inventoryLock)inventories.Clear();lock(badgeBatchGate){badgeBatches.Clear();badgeBackoff.Clear();badgeHashes.Clear();}searchCache.Clear();return Payload(new{success=true});}
 }""")
 m = p / "mods" / "TorBox" / "manifest.json"
@@ -85,6 +86,8 @@ english = {"language": "en", "title": "Original", "codec": "aac", "channels": 2}
 subRu = {"language": "ru", "title": "Full", "codec": "srt"}
 state = {"mutations": [], "streams": [], "metadata_mode": "normal", "cached": True, "expire": False, "parser_calls": 0, "stream_fail": False, "mylist": [], "links": [], "batch_mode": "ok", "pause": 0}
 episode_library_started = threading.Event()
+search_started = threading.Event()
+search_ok = threading.Event()
 
 
 def safe_query(q):
@@ -92,10 +95,12 @@ def safe_query(q):
 
 
 class Mock(BaseHTTPRequestHandler):
-    def respond(self, payload, status=200):
+    def respond(self, payload, status=200, retry=None):
         b = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        if retry is not None:
+            self.send_header("Retry-After", str(retry))
         self.end_headers()
         self.wfile.write(b)
 
@@ -114,6 +119,8 @@ class Mock(BaseHTTPRequestHandler):
         mode = state["batch_mode"]
         if mode == "unauthorized":
             return self.respond({"success": False}, 401)
+        if mode == "limited-timed":
+            return self.respond({"success": False}, 429, retry=2)
         if mode == "limited":
             return self.respond({"success": False}, 429)
         if mode == "invalid":
@@ -154,6 +161,10 @@ class Mock(BaseHTTPRequestHandler):
             return self.kino(u.path, q)
         if u.path.endswith("/indexers/all/results"):
             state["parser_calls"] += 1
+            if q.get("title") == ["Coalesce Fixture"]:
+                search_started.set()
+                search_ok.wait(5)
+                return self.respond({"Results":[]})
             if "wide_terms" in state:
                 if "query" in q:
                     state["wide_terms"].append(q["query"][0])
@@ -417,6 +428,35 @@ try:
         items[10] = initial_torrent
         reset()
 
+    flight_path = "/lite/torbox?title=Coalesce%20Fixture&clarification=1"
+    first = socket.create_connection(("127.0.0.1", app_port), timeout=5)
+    before = state["parser_calls"]
+    first.sendall(("GET " + flight_path + "&account_email=" + urllib.parse.quote(uid) +
+                   " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").encode())
+    try:
+        assert search_started.wait(3)
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            followers = [pool.submit(get, flight_path, None, who) for who in [uid, uid, second]]
+            try:
+                until = time.monotonic()+4
+                while time.monotonic()<until and api("/test/search-waiters")[1]["total"]<4:
+                    time.sleep(.02)
+                check("two distinct accounts have independent searches while followers share",
+                      api("/test/search-waiters")[1]["total"]==4 and state["parser_calls"]==before+2)
+                first.close()
+                until = time.monotonic()+2
+                while time.monotonic()<until and api("/test/search-waiters")[1]["total"]==4:
+                    time.sleep(.02)
+                check("one disconnected viewer detaches from an in-flight search",
+                      api("/test/search-waiters")[1]["total"]==3)
+            finally:
+                search_ok.set()
+            check("remaining viewers receive successful results after the leader leaves",
+                  all(f.result()[0]==200 for f in followers) and state["parser_calls"]==before+2)
+    finally:
+        first.close()
+        search_ok.set()
+
     search = "/lite/torbox?title=Mock%20Empty"
     rows = None
     code, body = api(search)
@@ -467,6 +507,25 @@ try:
     reset()
     code,html=get("/lite/torbox?title=Mock%20Quality")
     check("scarce HD copies keep cached SD ahead of uncached alternatives",code==200 and html.index("480p Small")<html.index("720p Available"))
+    rows[:] = [dict(row(A), Title="Order Fixture Ready 1080p", info={"voices":["Other"]}),
+               dict(row(B), Title="Order Fixture HEVC 720p", info={"voices":["Other"]}),
+               dict(row(C), Title="Order Fixture Dub 2160p", info={"voices":["Studio A"]})]
+    state["quality_cache"]={A:True,B:False,C:False}
+    reset()
+    def ranked_order(**options):
+        code, body=get("/lite/torbox?"+urllib.parse.urlencode(dict(title="Order Fixture",**options)))
+        assert code==200
+        return [entry["title"].split()[2] for entry in map(json.loads,re.findall("data-json='([^']+)'",body))
+                if entry.get("title","").startswith("Order Fixture ")]
+    check("default order favors ready then resolution",ranked_order()==["Ready","Dub","HEVC"])
+    prefs=dict(tb_prefer_voice="studio a",tb_prefer_format="codec:HEVC")
+    check("format, voice and availability priorities keep every release",
+          ranked_order(tb_order="format",**prefs)==["HEVC","Ready","Dub"]
+          and ranked_order(tb_order="voice",**prefs)==["Dub","Ready","HEVC"]
+          and ranked_order(tb_order="ready",**prefs)==["Ready","HEVC","Dub"])
+    check("preference sorting keeps explicit filters and has no effect on other callers",
+          ranked_order(tb_order="voice",tb_res="720p",**prefs)==["HEVC"]
+          and ranked_order()==["Ready","Dub","HEVC"])
     del state["quality_cache"]
     rows[:] = [dict(row(B), Title="Mock Show S01 2160p Cached"), dict(row(A), Title="Mock Show S01 1080p Own")]
     reset()
@@ -478,6 +537,9 @@ try:
     check("an owned exact episode still ranks before a higher resolution cached release",
           "1080p Own" in html and "2160p Cached" in html and html.index("1080p Own") < html.index("2160p Cached"))
     check("a known episode suppresses conflicting season hints","OtherSeason" not in html)
+    code, html=get("/lite/torbox?serial=1&title=Mock%20Show&tb_season=1&tb_episode=2&tb_order=format&tb_prefer_format=res%3A2160p")
+    check("format preference preserves the verified episode above higher resolution and excludes conflicting season",
+          code==200 and html.index("1080p Own")<html.index("2160p Cached") and "OtherSeason" not in html)
     reset()
     code,html=get("/lite/torbox?serial=1&title=Mock%20Show&tb_season=1&tb_episode=98")
     check("unproven season hints remain accessible without a verified file",code==200 and "OtherSeason" in html)
@@ -647,6 +709,14 @@ try:
     for mode, expected in (("unauthorized", 502), ("limited", 429), ("invalid", 502), ("active-limit", 502), ("unfinished", 502), ("partial", 502), ("duplicate", 502), ("http", 502)):
         code, payload, calls = links(mode)
         check("batch " + mode + " does not fall back", code == expected and not any(c[0] == "single" for c in calls))
+    code, payload, calls = links("limited-timed")
+    check("429 tells the viewer how many seconds remain", code==429 and "2 с" in payload["detail"] and len(calls)==1)
+    code, payload, calls = links("ok")
+    check("Retry-After suppresses repeated calls to the limited operation", code==429 and calls==[])
+    check("a capped link operation does not block listing", api("/torbox/item?id=1")[0]==200)
+    time.sleep(2.1)
+    check("the link operation resumes after Retry-After", links("ok")[0]==200)
+
     code, payload, calls = links("ok", [1, 1])
     check("duplicate file ids are rejected first", code == 400 and calls == [])
     code, payload, calls = links("ok", list(range(1, 10)))

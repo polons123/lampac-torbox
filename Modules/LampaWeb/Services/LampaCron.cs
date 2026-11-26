@@ -101,6 +101,7 @@ public static class LampaCron
                     string html = File.ReadAllText("wwwroot/lampa-main/index.html");
                     html = html.Replace("</body>", "<script src=\"/lampainit.js\"></script></body>");
 
+                    html = html.Replace("app.min.js?v=' + cache_version", "app.min.js'");
                     File.WriteAllText("wwwroot/lampa-main/index.html", html);
                     File.CreateText("wwwroot/lampa-main/personal.lampa");
 
