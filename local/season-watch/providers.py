@@ -115,7 +115,7 @@ def episode_files(files, hint=None):
     return seasons
 
 def measured_tags(streams):
-    video = next((s for s in streams if s.get('codec_type')=='video' and s.get('height')), {})
+    video = next((s for s in streams if s.get('codec_type')=='video' and s.get('height') and (s.get('disposition') or {}).get('attached_pic') not in (1,'1')), {})
     audio = [s for s in streams if s.get('codec_type')=='audio']
     channels = {1:'1.0',2:'2.0',6:'5.1',8:'7.1'}
     tags = {}
@@ -133,9 +133,14 @@ def release_summary(tags, label='', measured=None):
         if not data.get(key):
             match=re.search(pattern,label,re.I)
             if match:data[key]=match[1]+('p' if key=='resolution' else '')
+    if not data.get('hdr'):
+        formats=[('Dolby Vision',r'\b(?:DV|DoVi|Dolby[ ._-]*Vision)\b'),
+                 ('HDR10+',r'\bHDR10(?:\+|Plus\b)'),('HDR10',r'\bHDR10\b(?!\+)'),
+                 ('HDR',r'\bHDR\b'),('SDR',r'\bSDR\b')]
+        data['hdr']=[name for name,pattern in formats if re.search(pattern,label,re.I)]
     data.update(measured or {})
     parts=[]
-    aliases={'4k':'2160p','hevc':'HEVC','h265':'HEVC','x265':'HEVC','h264':'AVC','x264':'AVC','avc':'AVC','av1':'AV1','dv':'Dolby Vision','eac3':'DD+','ac3':'AC-3'}
+    aliases={'4k':'2160p','hevc':'HEVC','h265':'HEVC','x265':'HEVC','h264':'AVC','x264':'AVC','avc':'AVC','av1':'AV1','dv':'Dolby Vision','eac3':'DD+','ac3':'AC-3','aac':'AAC','stereo':'2.0','mono':'1.0','5.1(side)':'5.1','5.1(back)':'5.1'}
     for key in ('resolution','source','hdr','codec','audio','channels','editions'):
         values=data.get(key) or []
         for val in values if isinstance(values,list) else [values]:

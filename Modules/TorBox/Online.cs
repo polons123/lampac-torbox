@@ -87,7 +87,7 @@ public partial class TorBoxController
     static readonly Regex releaseAvc=new(@"\b(?:AVC|[xh][ ._-]?264)\b",RegexOptions.IgnoreCase|RegexOptions.CultureInvariant);
     static readonly Regex releaseAv1=new(@"\bAV1\b",RegexOptions.IgnoreCase|RegexOptions.CultureInvariant);
     static readonly string[] resolutionLabels={"2160p","1440p","1080p","720p","576p","480p","360p","Не указано"};
-    static readonly string[] hdrLabels={"Dolby Vision + HDR","Dolby Vision","HDR10+","HDR10","HDR","SDR","Не указано"};
+    static readonly string[] hdrLabels={"Dolby Vision + HDR10+","Dolby Vision + HDR10","Dolby Vision + HDR","Dolby Vision","HDR10+","HDR10","HDR","SDR","Не указано"};
     static readonly string[] codecLabels={"AV1","HEVC","AVC","Не указано"};
     static readonly string[] sizeLabels={"До 4 ГиБ","4–10 ГиБ","10–25 ГиБ","25–50 ГиБ","От 50 ГиБ","Не указан"};
     class ReleaseTags { public int Resolution; public string Res,Hdr,Codec; }
@@ -103,7 +103,7 @@ public partial class TorBoxController
         if(resolution==0 && releaseUhd.IsMatch(title))resolution=2160;
         bool dv=releaseDv.IsMatch(title),hdr10plus=releaseHdr10Plus.IsMatch(title),hdr10=releaseHdr10.IsMatch(title),hdr=releaseHdr.IsMatch(title);
         return new ReleaseTags{Resolution=resolution,Res=resolution>0?resolution+"p":"Не указано",
-            Hdr=dv&&(hdr10plus||hdr10||hdr)?"Dolby Vision + HDR":dv?"Dolby Vision":hdr10plus?"HDR10+":hdr10?"HDR10":hdr?"HDR":releaseSdr.IsMatch(title)?"SDR":"Не указано",
+            Hdr=dv&&hdr10plus?"Dolby Vision + HDR10+":dv&&hdr10?"Dolby Vision + HDR10":dv&&hdr?"Dolby Vision + HDR":dv?"Dolby Vision":hdr10plus?"HDR10+":hdr10?"HDR10":hdr?"HDR":releaseSdr.IsMatch(title)?"SDR":"Не указано",
             Codec=releaseHevc.IsMatch(title)?"HEVC":releaseAvc.IsMatch(title)?"AVC":releaseAv1.IsMatch(title)?"AV1":"Не указано"};
     }
     static ReleaseTags StoredTags(JToken row) {
@@ -111,10 +111,12 @@ public partial class TorBoxController
             return new ReleaseTags{Resolution=(int)row["tb_resolution"],Res=(string)row["tb_res"],Hdr=(string)row["tb_hdr"],Codec=(string)row["tb_codec"]};
         var parsed=ParseReleaseTags((string)row["Title"]);
         if(row["info"]?["releaseTags"] is JObject tags) {
-            string hdr=tags["hdr"] is JArray values ? string.Join(" ",values.Values<string>()) : (string)tags["hdr"];
-            var structured=ParseReleaseTags(string.Join(" ",(string)tags["resolution"],hdr,(string)tags["codec"]));
-            if(structured.Resolution>0){parsed.Resolution=structured.Resolution;parsed.Res=structured.Res;}
-            if(structured.Hdr!="Не указано")parsed.Hdr=structured.Hdr;
+            string Text(JToken value) => value is JArray list
+                ? string.Join(" ",list.Where(v=>v.Type==JTokenType.String).Values<string>())
+                : value?.Type==JTokenType.String ? (string)value : "";
+            var structured=ParseReleaseTags(string.Join(" ",Text(tags["resolution"]),Text(tags["codec"])));
+            if(structured.Resolution>parsed.Resolution){parsed.Resolution=structured.Resolution;parsed.Res=structured.Res;}
+            parsed.Hdr=ParseReleaseTags((string)row["Title"]+" "+Text(tags["hdr"])).Hdr;
             if(structured.Codec!="Не указано")parsed.Codec=structured.Codec;
         }
         return parsed;
@@ -138,17 +140,17 @@ public partial class TorBoxController
     static bool ReleaseYearAllowed(JObject release,string title,string originalTitle,int year,bool serial) {
         if(year<=0)return true;
         bool Matches(int value) => serial ? value>=year-1 : value==year;
-        var structuredYear=(release["info"] as JObject)?["relased"];
-        if(int.TryParse(structuredYear?.ToString(),out int parsedYear) && parsedYear is >= 1800 and <= 2199)
-            return Matches(parsedYear);
-
+        var years=CandidateYears(release,title,originalTitle,false);
+        return years.Length==0 || years.Any(Matches);
+    }
+    static int[] CandidateYears(JObject release,string title,string originalTitle,bool includeTags=true) {
+        foreach(var token in new[]{release["info"]?["relased"],includeTags?release["info"]?["releaseTags"]?["year"]:null})
+            if(int.TryParse(token?.ToString(),out int parsed) && parsed is >=1800 and <=2199)return new[]{parsed};
         string releaseTitle=" "+Normalize((string)release["Title"])+" ";
         foreach(string name in new[]{Normalize(title),Normalize(originalTitle)}.OrderByDescending(n=>n.Length)) {
             if(name.Length>0)releaseTitle=releaseTitle.Replace(" "+name+" "," ",StringComparison.Ordinal);
         }
-        var years=Regex.Matches(releaseTitle,@"\b(?:19|20)\d{2}\b").Select(m=>int.Parse(m.Value)).ToArray();
-        if(years.Length==0)return true;
-        return years.Any(Matches);
+        return Regex.Matches(releaseTitle,@"\b(?:19|20)\d{2}\b").Select(m=>int.Parse(m.Value)).ToArray();
     }
 
     [HttpGet, Route("lite/torbox")]
@@ -189,19 +191,23 @@ public partial class TorBoxController
             }
             if(tb_possible) {
                 // A broader index query is made only inside the explicitly opened manual group.
-                var term=Normalize(title??original_title).Split(' ').Where(x=>x.Length>=4).OrderByDescending(x=>x.Length).FirstOrDefault();
-                if(term!=null) {
+                using var timeout=CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
+                timeout.CancelAfter(TimeSpan.FromSeconds(4));
+                async Task<JArray> WideSearch(string term) {
                     var url=baseUri.ToString().TrimEnd('/')+"/api/v2.0/indexers/all/results?query="+Uri.EscapeDataString(term)+"&is_serial="+(serial==1?2:1)+"&apikey="+Uri.EscapeDataString((string)parser["api_key"]??"");
-                    using var timeout=CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
-                    timeout.CancelAfter(TimeSpan.FromSeconds(4));
                     try {
                         using var wider=await ParserClient.GetAsync(url,timeout.Token);
-                        if(wider.IsSuccessStatusCode && JObject.Parse(await wider.Content.ReadAsStringAsync(timeout.Token))["Results"] is JArray hits)
-                            foreach(var row in hits)rows.Add(row.DeepClone());
+                        if(wider.IsSuccessStatusCode)return JObject.Parse(await wider.Content.ReadAsStringAsync(timeout.Token))["Results"] as JArray;
                     } catch(Exception ex) when(!HttpContext.RequestAborted.IsCancellationRequested && (ex is HttpRequestException or OperationCanceledException or Newtonsoft.Json.JsonException)) { }
+                    return null;
                 }
+                var terms=new[]{title,original_title}.Select(WideTerm).Where(term=>term!=null).Distinct();
+                var batches=await Task.WhenAll(terms.Select(WideSearch));
+                foreach(var hits in batches.Where(batch=>batch!=null))
+                    foreach(var row in hits)rows.Add(row.DeepClone());
+                if(batches.All(batch=>batch!=null))StoreSearch(searchKey,rows,matched);
             }
-            StoreSearch(searchKey,rows,matched);
+            else StoreSearch(searchKey,rows,matched);
         }
         bool Confirmed(JObject t) =>
             (TitleMatches((string)t["Title"],matched.Title) || TitleMatches((string)t["Title"],matched.Original)) &&
@@ -252,11 +258,15 @@ public partial class TorBoxController
         }
         bool CachedHd(JObject row) => EpisodeRank(row)>=0 && states.TryGetValue(ReleaseHash(row)??"",out var ready) && ready==true && Resolution(row)>=1080;
         bool enoughHd=matching.Count(CachedHd)>=2;
-        var candidates=matching.OrderByDescending(EpisodeRank)
+        int? CandidateYear(JObject row) => CandidateYears(row,matched.Title,matched.Original)
+            .OrderBy(y=>Math.Abs((long)y-matched.Year)).Cast<int?>().FirstOrDefault();
+        var candidates=matching.Where(t=>episodeMatches.Count==0 || EpisodeRank(t)>=0)
+            .OrderByDescending(EpisodeRank)
+            .ThenBy(t=>tb_possible && serial!=1 && year>0 ? Math.Abs((long)(CandidateYear(t)??int.MaxValue)-year) : 0)
             .ThenBy(t=>enoughHd && Resolution(t) is >0 and <720)
             .ThenByDescending(t=>states.TryGetValue(ReleaseHash(t)??"",out var cached) && cached==true)
             .ThenByDescending(Resolution).ThenByDescending(t=>(int?)t["Seeders"]??0).Take(serial==1?96:12).ToArray();
-        var seasons=releases.SelectMany(t=>(t["info"]?["releaseTags"]?["seasons"] as JArray)?.Values<int>() ?? new[]{SeasonHint((string)t["Title"])}).Where(s=>s>0).Distinct().OrderBy(s=>s).ToArray();
+        var seasons=releases.SelectMany(t=>t["info"]?["releaseTags"]?["seasons"] is JArray {Count:>0} seasonsFound ? seasonsFound.Values<int>() : new[]{SeasonHint((string)t["Title"])}).Where(s=>s>0).Distinct().OrderBy(s=>s).ToArray();
         if(candidates.Length==0) {
             var empty=new SimilarTpl();empty.Append(tb_possible?"Возможных совпадений по этим фильтрам нет.":releases.Length==0?"Точных совпадений нет. Возможные совпадения доступны в фильтре.":"По выбранным фильтрам раздач нет. Измените фильтры или выберите «Все».",null,null,search);
             return Content(SimilarReleaseHtml(empty,voices,selected,search,true,tb_season,tb_episode,seasons,options,filters),"text/html; charset=utf-8");
@@ -285,7 +295,7 @@ public partial class TorBoxController
             group.Cache[ticket]=states.TryGetValue(hash,out var cached)?cached:null;
             if(!tb_possible && previous!=null)picks[previous].Next=ticket;
             previous=ticket;
-            tpl.Append(p.Name,(tb_possible?(int?)t["info"]?["relased"]:year)?.ToString(),(tb_possible?"Возможное совпадение · ":"")+ReleaseSummary(t)+" · Озвучка: "+ReleaseVoices(t)[0]+(ReleaseVoices(t).Length>1 ? " + "+(ReleaseVoices(t).Length-1) : ""),OnlineUrl("choose?pick="+ticket));
+            tpl.Append(p.Name,(tb_possible?CandidateYear(t):year)?.ToString(),(tb_possible?(serial==1?"Возможное совпадение · "+ManualFollowNotice+" · ":"Возможное совпадение · "):"")+ReleaseSummary(t)+" · Озвучка: "+ReleaseVoices(t)[0]+(ReleaseVoices(t).Length>1 ? " + "+(ReleaseVoices(t).Length-1) : ""),OnlineUrl("choose?pick="+ticket));
         }
         if(serial==1 && !tb_possible){var peers=seriesPicks.ToArray();foreach(var p in peers)p.SeriesPicks=peers;}
         return Content(SimilarReleaseHtml(tpl,voices,selected,search,false,tb_season,tb_episode,seasons,options,filters),"text/html; charset=utf-8");
@@ -303,12 +313,13 @@ public partial class TorBoxController
     static string ReleaseTrait(JToken row,string field) {
         if(field=="res" || field=="hdr" || field=="codec") {
             var tags=StoredTags(row);
+            if(field=="hdr" && tags.Hdr.StartsWith("Dolby Vision + HDR",StringComparison.Ordinal))return "Dolby Vision + HDR";
             return field=="res"?tags.Res:field=="hdr"?tags.Hdr:tags.Codec;
         }
         double size=PositiveNumber(row["Size"])/1073741824;
         return size<=0?"Не указан":size<4?"До 4 ГиБ":size<10?"4–10 ГиБ":size<25?"10–25 ГиБ":size<50?"25–50 ГиБ":"От 50 ГиБ";
     }
-    static string ReleaseSummary(JToken row) => string.Join(" · ",new[]{ReleaseTrait(row,"res"),(string)row["info"]?["releaseTags"]?["source"],ReleaseTrait(row,"hdr"),ReleaseTrait(row,"codec")}
+    static string ReleaseSummary(JToken row) => string.Join(" · ",new[]{ReleaseTrait(row,"res"),(string)row["info"]?["releaseTags"]?["source"],StoredTags(row).Hdr,ReleaseTrait(row,"codec")}
         .Where(v=>!string.IsNullOrEmpty(v) && v!="Не указано").Append(BytesLabel(PositiveNumber(row["Size"]))));
     static JObject PlaybackTrack(JToken track) {
         if(track is not JObject)return null;
@@ -381,13 +392,25 @@ public partial class TorBoxController
         return name.Length>0 && ((" "+candidate+" ").Contains(" "+name+" ",StringComparison.Ordinal) ||
             (Regex.IsMatch(name,@"[\p{IsCJKUnifiedIdeographs}\p{IsHiragana}\p{IsKatakana}\p{IsHangulSyllables}]") && candidate.Contains(name,StringComparison.Ordinal)));
     }
+    static readonly HashSet<string> commonWords=new(){"the","and","for","with","from","как","для","это","или","при","про"};
+    static string WideTerm(string title) {
+        var words=Normalize(title).Split(' ',StringSplitOptions.RemoveEmptyEntries);
+        bool Useful(string word) => word.Length>=3 && !commonWords.Contains(word) && !word.All(char.IsDigit);
+        // JacRed matches a contiguous substring. Keep the words in title order.
+        var pair=words.Zip(words.Skip(1),(a,b)=>(a,b)).Where(p=>Useful(p.a) && Useful(p.b))
+            .OrderByDescending(p=>p.a.Length+p.b.Length).FirstOrDefault();
+        if(pair.a!=null)return pair.a+" "+pair.b;
+        return words.Where(w=>Useful(w) && w.Length>=4).OrderByDescending(w=>w.Length).FirstOrDefault();
+    }
     static bool RelatedTitle(JObject row, params string[] requested) {
         foreach(string title in requested) {
             var wanted=Normalize(title).Split(' ',StringSplitOptions.RemoveEmptyEntries).ToHashSet();
             if(wanted.Count==0)continue;
             if(TitleMatches((string)row["Title"],title))return true;
             foreach(string field in new[]{"name","originalname"}) {
-                var actual=Normalize((string)row["info"]?[field]).Split(' ',StringSplitOptions.RemoveEmptyEntries).ToHashSet();
+                string canonical=Normalize((string)row["info"]?[field]);
+                if(canonical==Normalize(title))return true;
+                var actual=canonical.Split(' ',StringSplitOptions.RemoveEmptyEntries).ToHashSet();
                 int shared=actual.Count(wanted.Contains);
                 if(shared>=2 && shared*3>=2*Math.Max(wanted.Count,actual.Count))return true;
             }

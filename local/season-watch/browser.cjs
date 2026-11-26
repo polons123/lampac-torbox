@@ -94,6 +94,39 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
         await until("Lampa.Activity.active()?.component==='main'");
         await delay(1800);
         await ev("window.testMenus=[];window.notes=[];var origNoty=Lampa.Noty.show;Lampa.Noty.show=function(m){notes.push(m);return origNoty(m);};var actualSelect=Lampa.Select.show;Lampa.Select.show=function(o){testMenus.push(o);return actualSelect(o);};");
+        // Load the Online component with a synthetic search response and the real Lampa filter.
+        const online=fs.readFileSync(path.join(__dirname,'../../Online/plugin.js'),'utf8');
+        const component=online.slice(0,online.indexOf('  function addSourceSearch'))
+            .replace('{rch_websoket}','').replace('var balansers_with_search;','var balansers_with_search=[];')
+            .replace('var filter = new Lampa.Filter(object);','var filter = window.matchFilter = new Lampa.Filter(object);')
+            .replace('var network = new Network();','var network = new Network(); network.native=function(){};')
+            .replace('var torboxVoiceMenu = null;',`var torboxVoiceMenu = null;
+              this.fixtureResults=function(url) {
+                torboxVoiceMenu={search:url,options:['Studio A'],selected:'Studio A',filterSelected:{res:'1080p'},filterOptions:{}};
+                this.filter({season:[],voice:[]},this.getChoice());
+              };`);
+        await ev(component+'window.MatchComponent=component;})();');
+        await ev(`Lampa.Template.add('lampac_content_loading','<div></div>');
+          window.matchUrl=location.origin+'/lite/torbox?tb_possible=false';
+          window.match=new MatchComponent({movie:{id:123,title:'Fixture'},balanser:'torbox',url:matchUrl});
+          match.loading=function(){};
+          match.getChoice=()=>({torbox_voice:'Studio A',torbox_res:'1080p'});
+          match.saveChoice=()=>{};
+          match.initialize();
+          match.reset=()=>{};
+          match.request=url=>{matchUrl=url;match.fixtureResults(url);};
+          match.fixtureResults(matchUrl);`);
+        for(const [value,label] of [['true','Возможные совпадения'],['false','Точные совпадения']]){
+            await ev("matchFilter.show('Фильтр','filter')");
+            await until("testMenus.at(-1)?.items?.some(i=>i.title==='Совпадения')");
+            await ev("testMenus.at(-1).onSelect(testMenus.at(-1).items.find(i=>i.title==='Совпадения'))");
+            await until("testMenus.at(-1)?.items?.some(i=>i.title==='Возможные совпадения')");
+            await ev("testMenus.at(-1).onSelect(testMenus.at(-1).items.find(i=>i.title==="+JSON.stringify(label)+"))");
+            const chosen=new URL(await ev('matchUrl')).searchParams;
+            assert.deepEqual(chosen.getAll('tb_possible'),[value]);
+            assert.equal(chosen.get('tb_res'),'1080p');assert.equal(chosen.get('tb_voice'),'Studio A');
+        }
+        console.log('PASS Online/TorBox match groups preserve selected filters in both directions');
         await ev(fs.readFileSync(path.join(__dirname,'../../Modules/TorBox/plugin.js'),'utf8').replace('{localhost}',origin));
         await ev(fs.readFileSync(path.join(__dirname,'SeasonWatch/plugin.js'),'utf8').replace('{localhost}',origin));
         await until("document.querySelector('[data-action=all_releases] span')?.textContent==='1'");

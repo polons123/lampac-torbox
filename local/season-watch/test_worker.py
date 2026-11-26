@@ -107,6 +107,70 @@ class Tests(unittest.TestCase):
         self.assertEqual(result['files'][0]['release_summary'],'WEB-DL · HEVC')
         self.assertEqual(w.state()['release_metadata'][A]['measured'],{'codec':'hevc'})
 
+    def test_catalog_outage_cooldown_survives_requests(self):
+        self.p.items['home'].append(torrent(B,[]))
+        with patch.object(w.time,'time',return_value=1000) as clock, patch.object(self.p,'jac',side_effect=Unavailable('offline')) as search:
+            self.assertTrue(w.catalog(self.p,self.s)['cards'])
+            self.assertEqual(search.call_count,2)
+            clock.return_value=1059
+            w.catalog(self.p,w.state())
+            self.assertEqual(search.call_count,2)
+            clock.return_value=1061
+            search.side_effect=None
+            search.return_value=[dict(jac(A),tags={'source':'WEB-DL'})]
+            w.catalog(self.p,w.state())
+            self.assertEqual(search.call_count,4)
+            self.assertEqual(w.metadata_health(),{})
+
+    def test_scan_reuses_misses_and_refreshes_claims_with_measurements(self):
+        with patch.object(w,'lookup_release',return_value={}) as lookup, patch.object(w.time,'time',return_value=1000) as clock:
+            self.scan()
+            clock.return_value+=21600
+            self.scan()
+            self.assertEqual(lookup.call_count,1)
+            clock.return_value+=21601
+            lookup.return_value={'tags':{'source':'WEB-DL'}}
+            self.scan()
+            self.assertEqual(lookup.call_count,2)
+            lookup.return_value={'measured':{'codec':'hevc'}}
+            clock.return_value+=86401
+            self.scan()
+            self.assertEqual(lookup.call_count,3)
+            entry=self.s['release_metadata'][A]
+            self.assertEqual(entry['tags'],{'source':'WEB-DL'})
+            self.assertEqual(entry['measured'],{'codec':'hevc'})
+
+    def test_scan_shares_one_metadata_budget_across_libraries(self):
+        self.p.items['home']=[torrent(f'{n:040x}',[]) for n in range(5)]
+        self.p.items['peer']=[torrent(f'{n:040x}',[]) for n in range(5,10)]
+        with patch.object(w.time,'monotonic',return_value=0) as timer:
+            def slow_lookup(p,t,timeout):
+                timer.return_value+=timeout
+                return {}
+            with patch.object(w,'lookup_release',side_effect=slow_lookup) as lookup:
+                self.scan()
+                self.assertEqual(timer.return_value,120)
+                self.assertEqual(lookup.call_count,7)
+                self.assertEqual(len(self.s['catalog']['peer']),5)
+
+    def test_media_uses_leaf_and_excludes_attached_picture(self):
+        self.p.cfg={'ts':{'home':{'url':'https://home.invalid'}}}
+        self.p.items['home'][0].update(movie=True,tv=False,files=[
+            dict(id=1,name='WEB-DL/Film.DV.HDR10+.mkv',ffprobe=[
+                dict(codec_type='video',height=900,disposition={'attached_pic':1}),
+                dict(codec_type='video',height=1600,codec_name='hevc'),
+                dict(codec_type='audio',codec_name='aac',channel_layout='stereo'),
+                dict(codec_type='audio',codec_name='AAC',channels=2)])])
+        result=w.media(self.p,'home',A)
+        self.assertEqual(result['files'][0]['release_summary'],'1600p · Dolby Vision · HDR10+ · HEVC · AAC · 2.0')
+
+    def test_metadata_write_migrates_old_file_cache(self):
+        self.s.update(files={A:{'1':{}}},parser_version=2)
+        w.atomic(w.STATE,self.s)
+        w.cache_metadata({B:{'tags':{'source':'WEB-DL'}}},{})
+        persisted=json.loads(w.STATE.read_bytes())
+        self.assertEqual((persisted['parser_version'],persisted['files']),(3,{}))
+
     def test_infuse_metadata_and_media_sources(self):
         self.p.cfg={'ts':{p:{'url':'https://'+p+'.invalid'} for p in ('home','peer')}}
         for place in w.NAMES:

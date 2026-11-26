@@ -215,19 +215,44 @@ def lookup_release(p,t,timeout=18):
                 return {'tags':row.get('tags') or {},'measured':row.get('measured') or {}}
     return {}
 
-def live_metadata(p,t,cache,updates,deadline):
+def metadata_health(success=None):
+    # Separate from worker.lock so a long-running scan cannot block catalog reads.
+    path=ROOT/'metadata-health.json'
+    def read():
+        try:return json.loads(path.read_bytes())
+        except FileNotFoundError:return {}
+    if success is None:return read()
+    with (ROOT/'metadata-health.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        health=read()
+        if success:
+            if health:path.unlink(missing_ok=True)
+        else:
+            failures=health.get('failures',0)+1
+            atomic(path,dict(failures=failures,error_until=time.time()+60 if failures>=2 else 0))
+
+def live_metadata(p,t,cache,updates,deadline,*,background=False):
     h=t['hash']
     current=updates.get(h) or cache.get(h) or {}
-    if current.get('tags') or current.get('measured') or current.get('retry_after',0)>time.time():
+    positive=current.get('tags') or current.get('measured')
+    if (positive and not background) or current.get('retry_after',0)>time.time():
         return current
     left=deadline-time.monotonic()
-    if left>0:
-        try:
-            updates[h]=lookup_release(p,t,min(2,left)) or {'retry_after':int(time.time())+300}
-            return updates[h]
-        except ERRORS:
-            pass
-    return current
+    if left<=0 or metadata_health().get('error_until',0)>time.time():
+        return current
+    try:
+        exact=lookup_release(p,t,min(18 if background else 2,left))
+    except ERRORS:
+        metadata_health(False)
+        return current
+    metadata_health(True)
+    updated=dict(current)
+    for field in ('tags','measured'):
+        if exact.get(field):updated[field]=exact[field]
+    ttl=86400 if exact else (43200 if background else 300)
+    updated['retry_after']=int(time.time())+ttl
+    updates[h]=updated
+    return updated
 
 def cache_metadata(updates,previous):
     if not updates:return
@@ -236,7 +261,8 @@ def cache_metadata(updates,previous):
         with (ROOT/'worker.lock').open('a') as lock:
             try:fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:return
-            latest=json.loads(STATE.read_bytes()) if STATE.exists() else state()
+            latest=state()
+            latest['parser_version']=3
             cache=latest.setdefault('release_metadata',{})
             for h,value in updates.items():
                 if cache.get(h)==previous.get(h):cache[h]=value
@@ -256,17 +282,16 @@ def scan(p,st):
         if receipt['due']<=time.time():
             try: verify_deletion(p,st,*key.split(':',1))
             except ERRORS: pass
+    metadata_budget=120
     for place in NAMES:
         now=int(time.time())
         try:
             inventory=[enriched(p,st,t,place) for t in p.inventory(place)]
             metadata=st.setdefault('release_metadata',{})
+            start=time.monotonic()
             for t in inventory:
-                try:
-                    exact=lookup_release(p,t)
-                    if exact:metadata[t['hash']]=exact
-                except ERRORS as exc:
-                    print(f'{place} release metadata: {type(exc).__name__}',file=sys.stderr)
+                live_metadata(p,t,metadata,metadata,start+metadata_budget,background=True)
+            metadata_budget=max(0,metadata_budget-(time.monotonic()-start))
             cards=[card(t,place,metadata.get(t['hash'])) for t in inventory]
         except ERRORS as err:
             print(f'{place} inventory: {type(err).__name__}',file=sys.stderr)
@@ -548,10 +573,11 @@ def media(p,place,h):
         idx=int(f['id'])
         streams=f.get('ffprobe') or []
         measured=measured_tags(streams) if streams else (meta.get('measured') if len(videos)==1 else None)
-        summary=release_summary(meta.get('tags'),name,measured)
+        leaf=re.split(r'[/\\]',name)[-1]
+        summary=release_summary(meta.get('tags'),leaf,measured)
         if summary and len(videos)>1 and meta.get('tags') and not measured:
             summary='Раздача · '+summary
-        row=dict(name=re.split(r'[/\\]',name)[-1],path=name,id=idx,release_summary=summary)
+        row=dict(name=leaf,path=name,id=idx,release_summary=summary)
         if not t['movie']:
             for season,episodes in episode_files([f],hint).items():
                 row.update(season=season,episode=int(next(iter(episodes))))

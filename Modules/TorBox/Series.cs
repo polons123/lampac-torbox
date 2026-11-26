@@ -193,12 +193,13 @@ public partial class TorBoxController
         if(notice==null && state.Resolution>height && height>0)notice="Исходное видео этой серии ниже выбранного разрешения; сохранено исходное качество";
         return (url,notice);
     }
+    const string ManualFollowNotice="Автослежение доступно после подтверждения сериала";
     async Task<ActionResult> SeriesStream(string session,SeriesSession state,int index,string key,int version=-1) {
         var stream=await ResolveSeriesStream(state,index,key);
         if(state.FollowId==null)FollowSeries(state.Episodes[index].Pick,state,state.Episodes[index],key);
         else SaveSeriesPosition(state,index);
         string followNotice=state.FollowId==null && state.Episodes[index].Pick.SourceKey!=null
-            ? (state.FollowNotice??"Не удалось сохранить сезон для проверки обновлений") : null;
+            ? (state.Episodes[index].Pick.Film==null?ManualFollowNotice:state.FollowNotice??"Не удалось сохранить сезон для проверки обновлений") : null;
         return Payload(new{success=true,torbox_stream=true,url=stream.Url,quality=new JObject(),hls_manifest_timeout=60000,
             torbox_series=SeriesInfo(session,state,index,version),selection_notice=stream.Notice??followNotice});
     }

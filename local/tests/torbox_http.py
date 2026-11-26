@@ -154,6 +154,11 @@ class Mock(BaseHTTPRequestHandler):
             return self.kino(u.path, q)
         if u.path.endswith("/indexers/all/results"):
             state["parser_calls"] += 1
+            if "wide_terms" in state:
+                if "query" in q:
+                    state["wide_terms"].append(q["query"][0])
+                    return self.respond({"Results":rows if q["query"]==["last gram"] else []})
+                return self.respond({"Results":[]})
             if state.get("kino_search"):
                 state["kino_search"].append(q.get("title", [""])[0])
                 if q.get("title") == ["Теория большого взрыва"] and q.get("year") == ["2007"]:
@@ -434,6 +439,23 @@ try:
         check(label, code == 200 and ("choose?pick=" in html) == (expected == 200))
         code, manual = get(year_search+"&tb_possible=true")
         check(label+" in manual group", code == 200 and ("choose?pick=" in manual) == (expected == 404))
+    state["wide_terms"]=[]
+    rows[:]=[dict(row(A),Title="Alternate encode",info={"originalname":"The Last Gram"})]
+    reset()
+    code,html=get("/lite/torbox?"+urllib.parse.urlencode(dict(title="Последний грамм",original_title="The Last Gram",tb_possible="true")))
+    check("both localized and original phrases reach manual search",code==200 and "Alternate encode" in html
+          and sorted(state.pop("wide_terms"))==["last gram","последний грамм"])
+    rows[:]=[dict(row(format(i,"040x")),Title="Other release "+str(1980+i)+" 2160p",info={"originalname":"It"}) for i in range(13)]
+    rows.append(dict(row(B),Title="Local encode 720p DV",info={"originalname":"It","releaseTags":{"year":"2016","resolution":["1080p"],"codec":["HEVC"],"hdr":["HDR10"]}}))
+    reset()
+    before=state["parser_calls"]
+    code,html=get("/lite/torbox?"+urllib.parse.urlencode(dict(title="Оно",original_title="It",year=2017,tb_possible="true")))
+    check("short canonical title works without a broad substring query",code==200 and state["parser_calls"]==before+1 and "Local encode" in html)
+    check("nearby tagged year is ranked before menu cutoff",html.index("Local encode")<html.index("Other release") and "2016" in html)
+    menu=[json.loads(value) for value in re.findall("data-json='([^']+)'",html)]
+    candidate=next(item for item in menu if item.get("title")=="Local encode 720p DV")
+    check("candidate year is shown on its own card",candidate["year"]==2016)
+    check("HDR10 and title DV are both preserved with array codec", "Dolby Vision + HDR10" in candidate["details"] and "HEVC" in candidate["details"])
     fourth="d"*40
     rows[:] = [dict(row(h),Title="Mock Quality "+str(res)+"p "+name) for h,res,name in [
         (A,1080,"One"), (B,1080,"Two"), (C,720,"Available"), (fourth,480,"Small")]]
@@ -448,12 +470,17 @@ try:
     del state["quality_cache"]
     rows[:] = [dict(row(B), Title="Mock Show S01 2160p Cached"), dict(row(A), Title="Mock Show S01 1080p Own")]
     reset()
+    rows.append(dict(row(C),Title="Mock Show S09 OtherSeason",info={"releaseTags":{"seasons":[9]}}))
     state["episode_parallel"] = True
     code, html = get("/lite/torbox?serial=1&title=Mock%20Show&tb_season=1&tb_episode=2")
     state["episode_parallel"] = False
     check("episode library starts while cache badges are still in flight", code == 200 and state.get("episode_overlap"))
     check("an owned exact episode still ranks before a higher resolution cached release",
           "1080p Own" in html and "2160p Cached" in html and html.index("1080p Own") < html.index("2160p Cached"))
+    check("a known episode suppresses conflicting season hints","OtherSeason" not in html)
+    reset()
+    code,html=get("/lite/torbox?serial=1&title=Mock%20Show&tb_season=1&tb_episode=98")
+    check("unproven season hints remain accessible without a verified file",code==200 and "OtherSeason" in html)
     initial()
     watch = api("/torbox/series/followed")[1]["items"][0]["id"]
 
