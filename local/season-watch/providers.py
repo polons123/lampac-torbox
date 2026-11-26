@@ -90,6 +90,19 @@ def file_pair(leaf):
         return match
     return None
 
+# An explicit endpoint can repeat the season (S02E03-S02E04, 2x03-2x04).
+PAIR_END = re.compile(r'(?:[ ._+-]*(?:s(\d{1,2})[ ._-]*)?e|[ ._+-]+(\d{1,2})x|[+-]\s*)(\d{1,3})(?=$|[. _+()\[\]-]|e\d)',re.I)
+
+def explicit_episodes(leaf,match):
+    season,first=map(int,match.groups())
+    tail=leaf[match.end():]
+    end=PAIR_END.match(tail)
+    if not end:return season,[first]
+    last=int(end[3])
+    if int(end[1] or end[2] or season)!=season or last!=first+1 or PAIR_END.match(tail[end.end():]):
+        return season,[]
+    return season,[first,last]
+
 def episode_files(files, hint=None):
     seasons = {}
     for f in files:
@@ -100,18 +113,16 @@ def episode_files(files, hint=None):
         leaf = re.split(r'[/\\]',name)[-1]
         m = file_pair(leaf)
         if m:
-            season, ep = map(int, m.groups())
-            # Multiple episodes in one file require a manual decision.
-            if re.match(r'\s*[-+]?\s*[Ee]\d+|-\d{1,2}(?=[._ -]|$)', leaf[m.end():]):
-                continue
+            season,episodes=explicit_episodes(leaf,m)
         else:
             epmatch = EP.search(leaf) or re.match(r'^(\d{1,3})[ ._-]+', leaf)
             season = season_hint(name) or hint
             if not season or not epmatch:
                 continue
-            ep = int(epmatch.group(1))
-        if ep > 0 and season > 0:
-            seasons.setdefault(season, {}).setdefault(str(ep), []).append([leaf, size])
+            episodes=[int(epmatch.group(1))]
+        if season>0 and episodes and min(episodes)>0:
+            for ep in episodes:
+                seasons.setdefault(season, {}).setdefault(str(ep), []).append([leaf, size])
     return seasons
 
 def measured_tags(streams):

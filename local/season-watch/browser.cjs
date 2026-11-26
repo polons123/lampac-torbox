@@ -11,7 +11,7 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
     const selections=[];
     const deletions=[],gone=new Set();
     let checks=0;
-    let infuseMedia=false, incomplete=false;
+    let infuseMedia=false, incomplete=false, pairedMedia=false;
     const saves=[],batches=[];
     const fixture={items:[],checked:{peer:{time:1}},last:1};
     const example={id:'a'.repeat(32),revision:'b'.repeat(32),label:'Fixture 1080p',title:'Fixture <b>Show</b>',season:2,owned:[1,2],identities:[],choices:[],detail:'',tmdb:3};
@@ -46,6 +46,7 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
         }
         if(route==='/season-watch/media') {
             r.setHeader('Content-Type','application/json');
+            if(pairedMedia) return r.end(JSON.stringify({files:[{id:1,name:'Show.S03E01E02.mkv',path:'Show.S03E01E02.mkv',season:3,episode:1,episodes:[1,2],url:'https://fixture.invalid/pair'}]}));
             if(!infuseMedia) return r.end(JSON.stringify({files:[{id:1,name:'episode.mkv',path:'episode.mkv',url:'https://fixture.invalid/video'}],box_id:77}));
             const place=new URL(q.url,'http://localhost').searchParams.get('place');
             const movie=place==='home'?{title:'Film',id:55,release_date:'2024-01-01'}:{media_type:'tv',name:'Шоу',original_name:'Show',first_air_date:'2025-01-01'};
@@ -136,7 +137,7 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
         })`), 'My TorBox and All Releases must both be visible in the sidebar');
         await ev("$('[data-action=my_torbox]').trigger('hover:enter')");
         await until("Lampa.Activity.active()?.component==='my_torbox'");
-        await ev("window.playCalls=[];Lampa.Player.play=function(c){playCalls.push(c.url)}; Lampa.Player.playlist=function(){}");
+        await ev("window.playCalls=[];Lampa.Player.play=function(c){playCalls.push(c.url)}; Lampa.Player.playlist=function(list){window.lastPlaylist=list;}");
         await ev("$('[data-action=all_releases]').trigger('hover:enter')");
         await until("$('.all-releases-card').length===3");
         assert(await ev("$('.all-releases-source').text().includes('Домашний TorrServer') && $('.all-releases-source').text().includes('h2nexus-p')"));
@@ -150,6 +151,16 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
         assert.equal(actions,0);
         await ev("testMenus.at(-1).onSelect(testMenus.at(-1).items.find(x=>x.title==='Смотреть'))");
         await until("playCalls.includes('https://fixture.invalid/video')");
+        pairedMedia=true;
+        for(const episode of ['S03E01','S03E02']){
+            await openCard('h2nexus-p');
+            await ev("testMenus.at(-1).onSelect(testMenus.at(-1).items.find(x=>x.title==='Смотреть'))");
+            await until("testMenus.at(-1).items.some(x=>x.title==='S03E02')");
+            assert(await ev("testMenus.at(-1).items.every(x=>x.subtitle.includes('серии 1–2'))"));
+            await ev("testMenus.at(-1).onSelect(testMenus.at(-1).items.find(x=>x.title==="+JSON.stringify(episode)+"))");
+            assert(await ev("playCalls.at(-1)==='https://fixture.invalid/pair' && lastPlaylist.length===1"));
+        }
+        pairedMedia=false;
         await openCard('TorBox');
         await ev("testMenus.at(-1).onSelect(testMenus.at(-1).items.find(x=>x.title==='Смотреть'))");
         await until("playCalls.includes('https://fixture.invalid/box')");

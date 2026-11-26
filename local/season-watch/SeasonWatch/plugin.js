@@ -38,6 +38,9 @@
         },onBack:function () { Lampa.Select.hide(); back(); }});
     }
     function number(s,n) { return 'S'+('0'+s).slice(-Math.max(2,String(s).length))+'E'+('0'+n).slice(-Math.max(2,String(n).length)); }
+    function pairLabel(f) {
+        return f.episodes && f.episodes.length===2 ? f.season+' сезон · серии '+f.episodes.join('–') : '';
+    }
     function seenKey() { return 'season_watch_seen_'+Lampa.Utils.hash(account()); }
     function eventKey(w,n) {return (w.tmdb||w.id)+'/'+w.season+'/'+n;}
     var notices=[];
@@ -108,8 +111,17 @@
                     },error);
                     else open(f.url);
                 }
-                if (files.length===1) return launch(files[0]);
-                select('Выберите файл',files.map(function (f) {return {title:safe(f.name),subtitle:safe(f.path!==f.name?f.path.slice(0,-f.name.length):''),run:function () {launch(f);}};}),back);
+                var rows=[];
+                files.forEach(function (f) {
+                    var pair=pairLabel(f);
+                    if (pair) {
+                        f.episodes.forEach(function (n) {
+                            rows.push({title:number(f.season,n),subtitle:pair+' · '+safe(f.name),run:function () {launch(f);}});
+                        });
+                    } else rows.push({title:safe(f.name),subtitle:safe(f.path!==f.name?f.path.slice(0,-f.name.length):''),run:function () {launch(f);}});
+                });
+                if (rows.length===1) return launch(files[0]);
+                select('Выберите файл',rows,back);
             });
         }
         var infuseVisit=0;
@@ -158,7 +170,7 @@
                     }
                     if (files.length===1) return modes(files[0],false);
                     var rows=[{title:'Все видеофайлы',run:function () {modes(files[0],true);}}];
-                    files.forEach(function (f) {rows.push({title:safe(f.name),subtitle:safe([f.path!==f.name?f.path:'',f.release_summary].filter(Boolean).join(' · ')),run:function () {modes(f,false);}});});
+                    files.forEach(function (f) {rows.push({title:safe(f.name),subtitle:safe([pairLabel(f),f.path!==f.name?f.path:'',f.release_summary].filter(Boolean).join(' · ')),run:function () {modes(f,false);}});});
                     select('Infuse · '+c.title,rows,close);
                 }
                 if (window.lampac_infuse_saver && window.lampac_infuse_saver.menu) chooseFile();

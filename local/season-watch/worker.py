@@ -28,12 +28,16 @@ def atomic(path, value):
     finally:
         Path(name).unlink(missing_ok=True)
 
+FILE_PARSER_VERSION=4
+
 def state():
     if not STATE.exists():
         return dict(watches={}, files={}, replaced={}, sources={}, identities={}, checked={}, totals={})
     data = json.loads(STATE.read_text())
-    if data.get('parser_version') != 3:
-        data['files'] = {}
+    if data.get('parser_version')==3:
+        data['pending_file_index']=list(data.get('files',{}))
+    elif data.get('parser_version')!=FILE_PARSER_VERSION:
+        data['files']={}
     return data
 
 def display_name(t):
@@ -156,19 +160,28 @@ def examine(p,st,t,w,old,interactive=False,selection=''):
         return
     w.update(ready=ready,waiting=sorted(missing-set(ready)),candidate=cand['hash'],new_label=cand['label'],detail='')
 
+def indexed_files(p,st,t,place,force=False):
+    h=t['hash']
+    pending=st.get('pending_file_index',[])
+    known=st['files'].get(h,{})
+    if known and h not in pending and not force:return known
+    raw=t['files'] or (p.ts_files(place,h) if place!='box' else [])
+    if not raw and h in pending:
+        raise Unavailable('Ожидает повторного чтения списка файлов')
+    known=episode_files(raw,season_hint(t['label']))
+    if known:st['files'][h]=known
+    else:st['files'].pop(h,None)
+    if h in pending:pending.remove(h)
+    return known
+
 def item_rows(p,st,t,place,force=False):
     h=t['hash']
     if not HASH.fullmatch(h) or t['movie'] or place+':'+h in st['replaced']:
         return []
     hint=season_hint(t['label'])
-    known=st['files'].get(h)
     if not t['tv'] and not hint and not re.search(r'сезон|s\d{1,2}e\d|Season',t['label'],re.I) and not episode_files(t['files']):
         return []
-    if not known or force:
-        raw=t['files'] or (p.ts_files(place,h) if place!='box' else [])
-        known=episode_files(raw,hint)
-        if known:
-            st['files'][h]=known
+    known=indexed_files(p,st,t,place,force)
     if not known:
         return [make_row(t,place,hint or 0,'Не удалось определить серии по файлам')]
     tmdb, ids=identity(p,t,st)
@@ -262,7 +275,7 @@ def cache_metadata(updates,previous):
             try:fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:return
             latest=state()
-            latest['parser_version']=3
+            latest['parser_version']=FILE_PARSER_VERSION
             cache=latest.setdefault('release_metadata',{})
             for h,value in updates.items():
                 if cache.get(h)==previous.get(h):cache[h]=value
@@ -335,6 +348,8 @@ def prune(st):
     for field in ('files','identities','release_metadata'):
         st.setdefault(field,{})
         st[field]={h:value for h,value in st[field].items() if h in active}
+    if 'pending_file_index' in st:
+        st['pending_file_index']=[h for h in st['pending_file_index'] if h in active]
     valid=set(st['watches'])
     for place,rows in catalog.items():
         for row in rows:
@@ -345,7 +360,7 @@ def prune(st):
 
 def save(st):
     # Convert season keys to a common on-disk representation on every write.
-    st['parser_version']=3
+    st['parser_version']=FILE_PARSER_VERSION
     atomic(STATE,st)
     public=[]
     for w in st['watches'].values():
@@ -580,7 +595,9 @@ def media(p,place,h):
         row=dict(name=leaf,path=name,id=idx,release_summary=summary)
         if not t['movie']:
             for season,episodes in episode_files([f],hint).items():
-                row.update(season=season,episode=int(next(iter(episodes))))
+                numbers=sorted(map(int,episodes))
+                row.update(season=season,episode=numbers[0])
+                if len(numbers)>1:row['episodes']=numbers
         if place!='box':
             row['url']=p.cfg['ts'][place]['url']+'/stream/'+quote(row['name'],safe='')+'?link='+h+'&index='+str(idx)+'&play'
         rows.append(row)
@@ -854,10 +871,7 @@ def update_release(p,st,place,h,season,selection='',confirmation='',actor=None):
     t=enriched(p,st,existing(p,place,h),place)
     if place+':'+h in st['replaced']:
         return dict(message='Эта раздача уже обновлена')
-    known={} if t['movie'] else (st['files'].get(h) or {})
-    if not t['movie'] and not known:
-        known=episode_files(t['files'] or (p.ts_files(place,h) if place!='box' else []),season_hint(t['label']))
-        if known: st['files'][h]=known
+    known={} if t['movie'] else indexed_files(p,st,t,place)
     if not season and len(known)>1:
         return dict(seasons=sorted(map(int,known),reverse=True))
     if not season and known: season=int(next(iter(known)))

@@ -70,7 +70,30 @@ class Tests(unittest.TestCase):
         return self.s['watches'][w.item_id(place,A,2)]
     def test_file_numbers_and_folder_season(self):
         files=[dict(name=n,size=100) for n in ['Season 1/Второй сезон/03.mkv','Мультфильм.2x2.mkv','Сериал.2x05.mkv','Show.S02E07-E08.mkv']]
-        self.assertEqual(set(episode_files(files)[2]),{'3','5'})
+        self.assertEqual(set(episode_files(files)[2]),{'3','5','7','8'})
+
+    def test_explicit_episode_pairs_share_one_file(self):
+        for name in ('Show.S03E01E02','Show.S03E01-E02','Show.S03E01-S03E02','Show.3x01-02','Show.3x01-3x02'):
+            t=self.p.items['home'][0]
+            t['files']=[dict(id=7,name=name+'.mkv',size=100)]
+            self.p.cfg={'ts':{'home':{'url':'https://home.invalid'}}}
+            files=w.media(self.p,'home',A)['files']
+            self.assertEqual(len(files),1)
+            self.assertEqual((files[0]['id'],files[0]['season'],files[0]['episodes']),(7,3,[1,2]))
+            self.assertTrue(w.destination_has(t['files'],3,[1,2]))
+            self.assertFalse(w.destination_has(t['files'],3,[3]))
+        for name in ('Show.S03E01-S04E02','Show.S03E01E03','Show.S03E01E02E03'):
+            self.assertEqual(episode_files([dict(name=name+'.mkv',size=100)]),{})
+
+    def test_cached_single_episodes_reindexed_with_new_pairs(self):
+        self.s.update(parser_version=3,files={A:{'2':{'1':[['old.mkv',10]]}}})
+        w.atomic(w.STATE,self.s)
+        self.s=w.state()
+        self.assertIn(A,self.s['pending_file_index'])
+        self.p.items['home'][0]['files']=[dict(name='Show.S02E01E02.mkv',size=10)]
+        self.scan()
+        self.assertFalse(w.state()['pending_file_index'])
+        self.assertEqual(w.state()['watches'][w.item_id('home',A,2)]['owned'],[1,2])
 
     def test_metadata_applies_only_to_exact_hash(self):
         self.p.rows=[dict(jac(B),tags={'source':'WEB-DLRip'}),dict(jac(A),tags={'resolution':'720p'},measured={'resolution':'1080p'})]
@@ -169,7 +192,7 @@ class Tests(unittest.TestCase):
         w.atomic(w.STATE,self.s)
         w.cache_metadata({B:{'tags':{'source':'WEB-DL'}}},{})
         persisted=json.loads(w.STATE.read_bytes())
-        self.assertEqual((persisted['parser_version'],persisted['files']),(3,{}))
+        self.assertEqual((persisted['parser_version'],persisted['files']),(w.FILE_PARSER_VERSION,{}))
 
     def test_infuse_metadata_and_media_sources(self):
         self.p.cfg={'ts':{p:{'url':'https://'+p+'.invalid'} for p in ('home','peer')}}
