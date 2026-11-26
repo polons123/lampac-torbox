@@ -68,6 +68,23 @@ class Tests(unittest.TestCase):
         w.scan(self.p,self.s);w.save(self.s)
     def get(self,place='peer'):
         return self.s['watches'][w.item_id(place,A,2)]
+    def test_enrichment_timeout_retains_available_inventory(self):
+        with patch.object(w, 'catalog_place', side_effect=lambda *args: w.signal.raise_signal(w.signal.SIGALRM)):
+            w.refresh_inventory(self.p, 'home', 2)
+        partial = w.snapshot('home')
+        self.assertEqual([card['hash'] for card in partial['cards']], [A])
+        self.assertTrue(partial['partial'])
+        self.assertNotIn('error', partial)
+        with patch.object(w.time, 'time', return_value=partial['attempt'] + 11):
+            self.assertFalse(w.inventory_current(partial, 2))
+        w.refresh_inventory(self.p, 'home', 2)
+        self.assertNotIn('partial', w.snapshot('home'))
+        with patch.object(self.p, 'inventory', side_effect=Unavailable('offline')):
+            w.refresh_inventory(self.p, 'home', 2)
+        failed = w.snapshot('home')
+        self.assertEqual(failed['error'], 'offline')
+        self.assertEqual([c['hash'] for c in failed['cards']], [A])
+
     def test_file_numbers_and_folder_season(self):
         files=[dict(name=n,size=100) for n in ['Season 1/Второй сезон/03.mkv','Мультфильм.2x2.mkv','Сериал.2x05.mkv','Show.S02E07-E08.mkv']]
         self.assertEqual(set(episode_files(files)[2]),{'3','5','7','8'})

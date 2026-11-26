@@ -599,6 +599,7 @@ def refresh_inventory(p, place, epoch):
     def timeout(signum, frame):
         raise InventoryTimeout()
     last = snapshot(place)
+    published_inventory = False
     signal.signal(signal.SIGALRM, timeout)
     signal.alarm(45)
     try:
@@ -610,13 +611,18 @@ def refresh_inventory(p, place, epoch):
         quick = [card(enriched(p,st,t,place,lookup=False),place,cached.get(t['hash'])) for t in inventory]
         last = dict(cards=quick, asof=now, partial=True, epoch=epoch)
         atomic(snapshot_path(place),last)
+        published_inventory = True
         rows = catalog_place(p, st, place, inventory)
         last = dict(cards=rows, asof=now)
     except (InventoryTimeout, *ERRORS) as exc:
-        last['error'] = optional_label(exc)
+        if published_inventory:
+            # The library is available. Retry its optional metadata on the next refresh.
+            last['partial'] = True
+        else:
+            last.pop('partial', None)
+            last['error'] = optional_label(exc)
     finally:
         signal.alarm(0)
-    last.pop('partial',None)
     last.update(attempt=time.time(), epoch=epoch)
     atomic(snapshot_path(place), last)
 
@@ -631,7 +637,7 @@ def start_inventory_refresh(place, epoch):
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def inventory_current(value, epoch):
-    return value.get('epoch') == epoch and time.time() - value.get('attempt',0) < (10 if value.get('error') else 30)
+    return value.get('epoch') == epoch and time.time() - value.get('attempt',0) < (10 if value.get('error') or value.get('partial') else 30)
 
 def quick_catalog(st):
     epochs = {place:inventory_epoch(place) for place in NAMES}

@@ -1,6 +1,7 @@
 using Shared.Services;
 using System;
 using System.IO;
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Threading;
 using System.Threading.Tasks;
@@ -27,6 +28,26 @@ public static class LampaCron
 
     static int _updatingDb = 0;
 
+    static async Task<int> ProtectedFrontend(string action, ModuleConf init, string archive = null)
+    {
+        using var process = new Process();
+        var start = process.StartInfo;
+        start.FileName = "python3";
+        start.UseShellExecute = false;
+        start.RedirectStandardError = true;
+        start.ArgumentList.Add("-B");
+        start.ArgumentList.Add(Path.Combine(ModInit.modpath, "frontend", "install.py"));
+        foreach (string argument in new[] { action, init.git, init.tree }) start.ArgumentList.Add(argument ?? "");
+        if (archive != null) start.ArgumentList.Add(archive);
+        process.Start();
+        var diagnostics = await process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        if (!string.IsNullOrWhiteSpace(diagnostics)) Serilog.Log.Warning("Lampa frontend: {Diagnostics}", diagnostics);
+        if (process.ExitCode != 0 && !(action == "check" && process.ExitCode == 10))
+            throw new InvalidDataException("Protected Lampa frontend update failed");
+        return process.ExitCode;
+    }
+
     async static void cron(object state)
     {
         if (Interlocked.Exchange(ref _updatingDb, 1) == 1)
@@ -36,6 +57,21 @@ public static class LampaCron
         {
             var init = ModInit.conf;
             bool istree = !string.IsNullOrEmpty(init.tree);
+
+            if (File.Exists("data/lampa-frontend-patches.enabled"))
+            {
+                if (!init.autoupdate || await ProtectedFrontend("check", init) == 0) return;
+                byte[] zip = await Http.Download($"https://github.com/{init.git}/archive/{init.tree}.zip");
+                if (zip == null) throw new IOException("Pinned Lampa download failed");
+                string archive = Path.GetTempFileName();
+                try
+                {
+                    await File.WriteAllBytesAsync(archive, zip);
+                    await ProtectedFrontend("install", init, archive);
+                }
+                finally { File.Delete(archive); }
+                return;
+            }
 
             async Task<bool> update()
             {
@@ -47,6 +83,8 @@ public static class LampaCron
 
                 if (istree && File.Exists("wwwroot/lampa-main/tree") && init.tree == File.ReadAllText("wwwroot/lampa-main/tree"))
                     return false;
+
+                if (istree) return true; // Missing or different marker: install before recording the revision.
 
                 bool changeversion = false;
 
@@ -62,9 +100,6 @@ public static class LampaCron
                         changeversion = true;
 
                 });
-
-                if (istree)
-                    File.WriteAllText("wwwroot/lampa-main/tree", init.tree);
 
                 return changeversion;
             }
@@ -94,16 +129,17 @@ public static class LampaCron
                             Directory.CreateDirectory(Path.GetDirectoryName(outfile));
                             File.Copy(infilePath, outfile, true);
                         }
-
-                        File.WriteAllText("wwwroot/lampa-main/tree", init.tree);
                     }
 
                     string html = File.ReadAllText("wwwroot/lampa-main/index.html");
                     html = html.Replace("</body>", "<script src=\"/lampainit.js\"></script></body>");
 
                     html = html.Replace("app.min.js?v=' + cache_version", "app.min.js'");
+                    if (!html.Contains("putScript('app.min.js'") || !html.Contains("urlJoin(lampa_url, 'app.min.js')") ||
+                        !html.Contains("urlJoin(lampa_url, 'lampa-main/app.min.js')"))
+                        Serilog.Log.Warning("Lampa index loader template changed; verify all three app.min.js routes");
                     File.WriteAllText("wwwroot/lampa-main/index.html", html);
-                    File.CreateText("wwwroot/lampa-main/personal.lampa");
+                    File.WriteAllText("wwwroot/lampa-main/personal.lampa", "");
 
                     if (!File.Exists("wwwroot/lampa-main/plugins_black_list.json"))
                         File.WriteAllText("wwwroot/lampa-main/plugins_black_list.json", "[]");
@@ -118,6 +154,8 @@ public static class LampaCron
 
                     if (!isDefaultDirectory)
                         Directory.Delete($"wwwroot/{targetDirectory}", true);
+
+                    if (istree) File.WriteAllText("wwwroot/lampa-main/tree", init.tree);
                 }
             }
         }

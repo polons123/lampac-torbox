@@ -1,5 +1,6 @@
 """Compile actual media modules in an isolated runtime, using synthetic services."""
 import argparse
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -87,6 +88,11 @@ print(json.dumps({'streams':[{'codec_type':'video','codec_name':'h264'}],'format
             except urllib.error.HTTPError as e:code,raw=e.code,e.read().decode()
             try:return code,json.loads(raw)
             except ValueError:return code,raw
+        cache = root / 'database/tracks'
+        cache.mkdir(parents=True)
+        abandoned = cache / ('0' * 32 + '.tmp')
+        abandoned.touch()
+        os.utime(abandoned, (1, 1))
         log=(root/'server.log').open('w');proc=subprocess.Popen([args.dotnet,'Core.dll'],cwd=root,stdout=log,stderr=subprocess.STDOUT)
         try:
             for _ in range(160):
@@ -98,6 +104,25 @@ print(json.dumps({'streams':[{'codec_type':'video','codec_name':'h264'}],'format
             else:raise AssertionError('isolated runtime startup timeout')
             assert get('/ffprobe')[0]==200,(root/'server.log').read_text()[-6000:]
             def probe(mode):return get('/ffprobe?'+urllib.parse.urlencode({'media':'http://example.test/'+mode}))
+            assert not abandoned.exists()
+            # The final rename fails after Brotli closes. Preserve the response and allow retry.
+            final = cache / hashlib.md5(b'http://example.test/write-failure').hexdigest()
+            final.mkdir()
+            result = probe('write-failure')
+            assert result[1].get('streams'), (result, (root/'server.log').read_text()[-3600:])
+            assert not list(cache.glob(final.name + '.*.tmp'))
+            final.rmdir()
+            assert probe('write-failure')[1].get('streams') and final.is_file()
+            # With an unavailable cache directory, a probe result must still reach its caller.
+            cache.rename(cache.with_name('tracks-backup'))
+            cache.write_bytes(b'')
+            try:
+                assert probe('unwritable-cache')[1].get('streams')
+            finally:
+                cache.unlink()
+                cache.with_name('tracks-backup').rename(cache)
+            assert probe('unwritable-cache')[1].get('streams')
+            print('PASS failed cache writes and failed publication preserve results and retry', flush=True)
             with ThreadPoolExecutor(max_workers=8) as pool:
                 result=list(pool.map(lambda _:probe('ok'),range(8)))
             assert all(code==200 and data.get('streams') for code,data in result),result

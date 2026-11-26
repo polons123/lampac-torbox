@@ -201,9 +201,26 @@ public class TracksController : BaseController
             if (!string.IsNullOrWhiteSpace(outPut))
             {
                 // Publish complete files to readers that bypass the cold-probe gate.
-                string pendingPath = cachePath + ".tmp";
-                await BrotliTo.CompressAsync(pendingPath, outPut);
-                if (System.IO.File.Exists(pendingPath)) System.IO.File.Move(pendingPath, cachePath, true);
+                string pendingPath = cachePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    await using (var output = new System.IO.FileStream(pendingPath, System.IO.FileMode.CreateNew, System.IO.FileAccess.Write, System.IO.FileShare.None))
+                    await using (var compressed = new System.IO.Compression.BrotliStream(output, System.IO.Compression.CompressionLevel.Fastest))
+                        await compressed.WriteAsync(Encoding.UTF8.GetBytes(outPut), budget.Token);
+                    System.IO.File.Move(pendingPath, cachePath, true);
+                }
+                catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException)
+                {
+                    Serilog.Log.Warning("Tracks cache write failed ({ErrorType})", ex.GetType().Name);
+                }
+                finally
+                {
+                    try { System.IO.File.Delete(pendingPath); }
+                    catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException)
+                    {
+                        Serilog.Log.Warning("Tracks temporary file cleanup failed ({ErrorType})", ex.GetType().Name);
+                    }
+                }
             }
             else hybridCache.Set(memKey, outPut, DateTime.Now.AddMinutes(5), inmemory: true);
         }

@@ -24,7 +24,19 @@ public class ModInit : IModuleLoaded
         foreach (var m in conf.limit_map)
             CoreInit.conf.WAF.limit_map.Insert(0, m);
 
-        Directory.CreateDirectory("database/tracks");
+        var directory = Directory.CreateDirectory("database/tracks");
+        // A killed process cannot run its finally block. Only remove abandoned probe writes.
+        try
+        {
+            foreach (var pending in directory.EnumerateFiles("*.tmp"))
+                if (pending.LastWriteTimeUtc < System.DateTime.UtcNow.AddDays(-1) &&
+                    System.Text.RegularExpressions.Regex.IsMatch(pending.Name, @"^[a-f0-9]{32}(\.[a-f0-9]{32})?\.tmp$"))
+                    pending.Delete();
+        }
+        catch (System.Exception ex) when (ex is IOException or System.UnauthorizedAccessException)
+        {
+            Serilog.Log.Warning("Tracks cache cleanup failed ({ErrorType})", ex.GetType().Name);
+        }
     }
 
     public void Dispose()

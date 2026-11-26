@@ -137,3 +137,21 @@ player statistics are separate. `selezen` retains the upstream exclusion.
 older clients. Rutube accepts categories 4 and 13 by operator choice. AdminPanel,
 Telemetry and Tracks are enabled in this custom package. Player metrics obtain
 bitrate from HLS; unknown direct-file bitrate is displayed as unavailable.
+
+### Pinned Lampa frontend overlays
+
+On Linux, the presence of `data/lampa-frontend-patches.enabled` enables the
+protected updater for this installation when LampaWeb autoupdate is enabled.
+The release packages the updater and its three patches in
+`module/LampaWeb/frontend/`. It uses Python 3, GNU patch and a filesystem
+supporting atomic directory exchange. Staging must be on the same filesystem
+as the live Lampa directory.
+
+The updater checks both the input and output SHA-256 for each patched asset.
+Before switching to another upstream revision, review the patches, update the
+pinned tree and digests in the updater, and run
+`python3 local/tests/frontend_update.py /path/to/upstream.zip`. Pass
+`--theme /path/to/original/new_view.js` to exercise the optional theme too.
+An incompatible Lampa archive leaves the active directory and tree marker
+in place. A separately updated New View with unknown bytes produces a warning
+and retains its contents.

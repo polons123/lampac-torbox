@@ -15,6 +15,8 @@ using System.Formats.Tar;
 using System.IO.Compression;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using System.Threading;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -134,11 +136,73 @@ public class ApiController : BaseController
 
 
     #region app.min.js
-    // Keep the last fully rendered bundle. Request-specific transformations always run per request.
-    sealed record AppBundle((string type, string origin, bool cubProxy, string mirror, string source, string rules) Key,
-        byte[] Body, EntityTagHeaderValue Tag);
+    sealed record BundleKey(string Type, string Origin, bool CubProxy, string Mirror, string Source, string Rules);
+    sealed record AppBundle(byte[] Body, EntityTagHeaderValue Tag);
+    static readonly LinkedList<(BundleKey Key, AppBundle Bundle)> bundles = new();
+    static readonly object bundleRenderLock = new();
 
-    static AppBundle lastBundle;
+    // Linux statx has a fixed ABI. ctime changes even if a writer restores mtime.
+    [StructLayout(LayoutKind.Explicit, Size = 256)]
+    struct FileStamp
+    {
+        [FieldOffset(0)] public uint Mask;
+        [FieldOffset(32)] public ulong Inode;
+        [FieldOffset(40)] public ulong Size;
+        [FieldOffset(96)] public long ChangedSeconds;
+        [FieldOffset(104)] public uint ChangedNanoseconds;
+        [FieldOffset(136)] public uint DeviceMajor;
+        [FieldOffset(140)] public uint DeviceMinor;
+    }
+
+    [DllImport("libc", EntryPoint = "statx")]
+    static extern int StatFile(SafeFileHandle fd, string path, int flags, uint mask, out FileStamp stamp);
+
+    static string SourceVersion(IO.FileStream stream)
+    {
+        const uint required = 0x80 | 0x100 | 0x200; // ctime, inode, size
+        if (OperatingSystem.IsLinux())
+        {
+            try
+            {
+                if (StatFile(stream.SafeFileHandle, "", 0x1000, required, out var s) == 0 && (s.Mask & required) == required)
+                    return $"{s.DeviceMajor}:{s.DeviceMinor}:{s.Inode}:{s.Size}:{s.ChangedSeconds}:{s.ChangedNanoseconds}";
+            }
+            catch (EntryPointNotFoundException) { }
+        }
+        return Convert.ToHexString(SHA256.HashData(stream));
+    }
+
+    static AppBundle CachedBundle(BundleKey key)
+    {
+        lock (bundles)
+        {
+            var entry = bundles.First;
+            while (entry != null && entry.Value.Key != key) entry = entry.Next;
+            if (entry == null) return null;
+            bundles.Remove(entry);
+            bundles.AddFirst(entry);
+            return entry.Value.Bundle;
+        }
+    }
+
+    static AppBundle GetBundle(BundleKey key, Func<AppBundle> render)
+    {
+        var hit = CachedBundle(key);
+        if (hit != null) return hit;
+        // Serialize cold renders on small hosts. Warm variants remain readable.
+        lock (bundleRenderLock)
+        {
+            hit = CachedBundle(key);
+            if (hit != null) return hit;
+            var bundle = render();
+            lock (bundles)
+            {
+                bundles.AddFirst((key, bundle));
+                if (bundles.Count > 4) bundles.RemoveLast();
+            }
+            return bundle;
+        }
+    }
 
     ActionResult ServeApp(AppBundle bundle)
     {
@@ -179,13 +243,16 @@ public class ApiController : BaseController
             r.Value.StartsWith("file:") ? IO.File.ReadAllText(r.Value.Substring(5)) : r.Value)).ToArray();
 
         using var stream = IO.File.OpenRead($"wwwroot/{type}/app.min.js");
-        var key = (type, origin, cubProxy, mirror,
-            handlers == null ? Convert.ToHexString(SHA256.HashData(stream)) : null,
+        AppBundle Render() => RenderBundle(stream, type, origin, cubProxy, mirror, rules, handlers);
+        if (handlers != null) return ServeApp(Render());
+        var key = new BundleKey(type, origin, cubProxy, mirror, SourceVersion(stream),
             rules == null ? null : JsonConvert.SerializeObject(rules));
-        var cached = Volatile.Read(ref lastBundle);
-        if (handlers == null && cached != null && cached.Key == key)
-            return ServeApp(cached);
+        return ServeApp(GetBundle(key, Render));
+    }
 
+    AppBundle RenderBundle(IO.FileStream stream, string type, string origin, bool cubProxy, string mirror,
+        KeyValuePair<string, string>[] rules, Delegate handlers)
+    {
         stream.Position = 0;
         using var reader = new IO.StreamReader(stream);
         string file = reader.ReadToEnd();
@@ -257,9 +324,7 @@ public class ApiController : BaseController
 
         byte[] bytes = Encoding.UTF8.GetBytes(bulder.ToString());
         var tag = new EntityTagHeaderValue("\"" + Convert.ToHexString(SHA256.HashData(bytes)) + "\"", isWeak: true);
-        var bundle = new AppBundle(key, bytes, tag);
-        if (handlers == null) Volatile.Write(ref lastBundle, bundle);
-        return ServeApp(bundle);
+        return new AppBundle(bytes, tag);
     }
     #endregion
 
