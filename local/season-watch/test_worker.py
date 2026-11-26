@@ -85,6 +85,28 @@ class Tests(unittest.TestCase):
         for name in ('Show.S03E01-S04E02','Show.S03E01E03','Show.S03E01E02E03'):
             self.assertEqual(episode_files([dict(name=name+'.mkv',size=100)]),{})
 
+    def test_channel_tag_and_ambiguous_endpoint(self):
+        for separator in ('.','-'):
+            files=[dict(name='Сериал.S01E05'+separator+'2x2.mkv',size=100)]
+            self.assertEqual(set(episode_files(files)[1]),{'5'})
+        for ending in ('-2','-02','-10'):
+            files=[dict(id=3,name='Show.S03E01'+ending+'.mkv',size=100)]
+            self.p.items['box'][0]['files']=files
+            self.assertFalse(w.destination_has(files,3,[2]))
+            self.assertIn('episode_note',w.media(self.p,'box',A)['files'][0])
+
+    def test_empty_box_inventory_keeps_calendar_and_blocks_update(self):
+        self.scan()
+        self.p.items['box'][0]['files']=[]
+        self.s['pending_file_index']=[A]
+        self.scan()
+        row=self.get('box')
+        self.assertTrue(row['stale'])
+        self.assertEqual(row['owned'],[1,2])
+        with self.assertRaises(Unavailable):
+            w.update_release(self.p,self.s,'box',A,2)
+        self.assertFalse(self.p.writes or self.p.removals)
+
     def test_cached_single_episodes_reindexed_with_new_pairs(self):
         self.s.update(parser_version=3,files={A:{'2':{'1':[['old.mkv',10]]}}})
         w.atomic(w.STATE,self.s)
@@ -92,7 +114,7 @@ class Tests(unittest.TestCase):
         self.assertIn(A,self.s['pending_file_index'])
         self.p.items['home'][0]['files']=[dict(name='Show.S02E01E02.mkv',size=10)]
         self.scan()
-        self.assertFalse(w.state()['pending_file_index'])
+        self.assertNotIn('pending_file_index',w.state())
         self.assertEqual(w.state()['watches'][w.item_id('home',A,2)]['owned'],[1,2])
 
     def test_metadata_applies_only_to_exact_hash(self):

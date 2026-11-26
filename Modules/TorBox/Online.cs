@@ -597,7 +597,7 @@ public partial class TorBoxController
     }
 
     [HttpGet, Route("lite/torbox/choose")]
-    public Task<ActionResult> Choose(string pick, long file=-1, int audio=-1, int sub=-2, int resolution=-1, int season=0) => Guard(async(c,key)=>{
+    public Task<ActionResult> Choose(string pick, long file=-1, int audio=-1, int sub=-2, int resolution=-1, int season=0,int number=0) => Guard(async(c,key)=>{
         var requested=GetPick(pick);
         if(!await requested.Gate.WaitAsync(TimeSpan.FromSeconds(2),HttpContext.RequestAborted))return Error(429,"TorBox уже обрабатывает эту раздачу");
         (string Ticket, Pick Selection, JToken Torrent)? ready;
@@ -609,7 +609,7 @@ public partial class TorBoxController
         if(ready==null)return Error(404,requested.RequestedSeason>0 ? "В готовых раздачах не найдена выбранная серия с распознанным номером. Загрузки не запускались" : "В выбранной и следующих раздачах нет готового видео в кэше TorBox. Загрузки не запускались");
         var p=ready.Value.Selection;
         var t=ready.Value.Torrent;
-        if(pick!=ready.Value.Ticket){file=-1;audio=-1;sub=-2;resolution=-1;}
+        if(pick!=ready.Value.Ticket){file=-1;audio=-1;sub=-2;resolution=-1;number=0;}
         pick=ready.Value.Ticket;
         var files=(t["files"] as JArray??new JArray()).Where(f=>VideoName(FileName(f))).OrderByDescending(f=>(long?)f["size"]??0).ToArray();
         if(files.Length==0)return Error(404,"В раздаче нет видеофайлов");
@@ -625,9 +625,10 @@ public partial class TorBoxController
             if(file<0 && p.RequestedSeason>0) {
                 var target=episodes.FirstOrDefault(e=>e.Numbered && e.Season==p.RequestedSeason && e.Episode==p.RequestedEpisode);
                 if(target==null)return Error(404,"Выбранная серия отсутствует или её номер не распознан");
-                file=target.File;
+                file=target.File;number=target.Episode;
             }
             if(file<0){
+                if(episodes.Count==0)return Error(404,"Не удалось определить серии. Выберите видеофайл в разделе «Все раздачи»");
                 var episodeTpl=new SimilarTpl();
                 var frames=new List<(int Season,int Episode)?>();
                 string episodeRoute="choose?pick="+pick;
@@ -639,8 +640,8 @@ public partial class TorBoxController
                 } else {
                     var seasons=episodes.Select(e=>e.Season).Distinct().ToArray();
                     if(seasons.Length>1)
-                        foreach(int number in seasons) {
-                            episodeTpl.Append("Открыть сезон "+number,null,null,OnlineUrl(episodeRoute+"&season="+number));
+                        foreach(int seasonNumber in seasons) {
+                            episodeTpl.Append("Открыть сезон "+seasonNumber,null,null,OnlineUrl(episodeRoute+"&season="+seasonNumber));
                             frames.Add(null);
                         }
                 }
@@ -648,12 +649,12 @@ public partial class TorBoxController
                 foreach(var group in episodes.GroupBy(e=>(e.Season,e.Episode)))
                     foreach(var episode in group) {
                         episodeTpl.Append(EpisodeTitle(episode)+(episode.DisplayName!=null && group.Count()>1?" · "+episode.Name:""),null,null,
-                            OnlineUrl("choose?pick="+pick+"&file="+episode.File));
+                            OnlineUrl("choose?pick="+pick+"&file="+episode.File+"&number="+episode.Episode));
                         frames.Add((episode.Season,episode.Episode));
                     }
                 return Menu(episodeTpl,frames.ToArray());
             }
-            if(!episodes.Any(e=>e.File==file))return Error(400,"Выбранный файл не распознан как серия");
+            if(!episodes.Any(e=>e.File==file && (number==0 || e.Episode==number)))return Error(400,"Выбранный файл не распознан как серия");
         }
         if(!p.Serial && file<0 && files.Length>1) {
             var fileMenu=new SimilarTpl();
@@ -661,14 +662,15 @@ public partial class TorBoxController
             return Menu(fileMenu,(0,0));
         }
         if(file<0)file=(long?)files[0]["id"]??-1;
-        var frame=p.Serial?EpisodeFiles(p,t).FirstOrDefault(e=>e.File==file):null;
+        var frame=p.Serial?EpisodeFiles(p,t).FirstOrDefault(e=>e.File==file && (number==0 || e.Episode==number)):null;
         if(!files.Any(f=>(long?)f["id"]==file))return Error(404,"Видеофайл отсутствует в раздаче");
         if(!p.Metadata.TryGetValue(file,out var data)){
             data=await StreamData(key,p.Id.Value,file,0,-1);p.Metadata[file]=data;
         }
         var audios=data["metadata"]?["audios"] as JArray??new JArray();
         var subtitles=data["metadata"]?["subtitles"] as JArray??new JArray();
-        string route="choose?pick="+pick+"&file="+file;
+        string numberQuery=frame==null?"":"&number="+frame.Episode;
+        string route="choose?pick="+pick+"&file="+file+numberQuery;
         var tpl=new SimilarTpl();
         var video=data["metadata"]?["video"];
         int width=(int?)video?["width"]??0,height=(int?)video?["height"]??0;
@@ -704,7 +706,7 @@ public partial class TorBoxController
         if(sub < -1 || sub>=subtitles.Count)return Error(400,"Дорожка субтитров отсутствует");
         var movie=new MovieTpl(p.Movie,p.Movie);
         string selection=(resolution==0?"Исходное разрешение":resolution+"p")+" · "+(audios.Count>audio?TrackLabel(audios[audio]):"Звук по умолчанию")+" · "+(sub<0?"Без субтитров":TrackLabel(subtitles[sub]));
-        movie.Append(string.IsNullOrWhiteSpace(p.Movie)?p.Name:p.Movie,OnlineUrl("play?pick="+pick+"&file="+file+"&resolution="+resolution+"&audio="+audio+"&sub="+sub),method:"call",voice_name:selection+" · Раздача: "+p.Name,hls_manifest_timeout:60000);
+        movie.Append(string.IsNullOrWhiteSpace(p.Movie)?p.Name:p.Movie,OnlineUrl("play?pick="+pick+"&file="+file+numberQuery+"&resolution="+resolution+"&audio="+audio+"&sub="+sub),method:"call",voice_name:selection+" · Раздача: "+p.Name,hls_manifest_timeout:60000);
         return Content(ChosenHtml(movie.ToHtml(),p,requested,FileName(files.First(f=>(long?)f["id"]==file)),preference:PlaybackPreference(data,resolution,audio,sub)),"text/html; charset=utf-8");
     });
     static bool CachedReady(JToken t) =>
@@ -794,7 +796,7 @@ public partial class TorBoxController
     }
 
     [HttpGet, Route("lite/torbox/play")]
-    public Task<ActionResult> OnlinePlay(string pick,long file,int audio=-1,int sub=-2,int resolution=-1) => Guard(async(c,key)=>{
+    public Task<ActionResult> OnlinePlay(string pick,long file,int audio=-1,int sub=-2,int resolution=-1,int number=0) => Guard(async(c,key)=>{
         var p=GetPick(pick);
         if(p.Id==null || !p.Metadata.TryGetValue(file,out var known))return Error(400,"Сначала выберите параметры видео");
         int ac=(known["metadata"]?["audios"] as JArray)?.Count??0,sc=(known["metadata"]?["subtitles"] as JArray)?.Count??0;
@@ -803,7 +805,7 @@ public partial class TorBoxController
         if(resolution!=0 && !(new[]{1440,1080,720,480,360}.Contains(resolution) && resolution<height))return Error(400,"Выберите доступное разрешение");
         if(p.Serial){
             string selection=(resolution==0?"Исходное разрешение":resolution+"p")+" · "+(ac>audio?TrackLabel(known["metadata"]["audios"][audio]):"Звук по умолчанию")+" · "+(sub<0?"Без субтитров":TrackLabel(known["metadata"]["subtitles"][sub]));
-            return await StartSeries(p,file,resolution,audio,sub,selection,key);
+            return await StartSeries(p,file,number,resolution,audio,sub,selection,key);
         }
         var data=await StreamData(key,p.Id.Value,file,audio,sub,resolution==0?null:ResolutionIndex(resolution));
         string url=(string)data["hls_url"];

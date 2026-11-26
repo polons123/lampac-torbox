@@ -91,17 +91,30 @@ def file_pair(leaf):
     return None
 
 # An explicit endpoint can repeat the season (S02E03-S02E04, 2x03-2x04).
-PAIR_END = re.compile(r'(?:[ ._+-]*(?:s(\d{1,2})[ ._-]*)?e|[ ._+-]+(\d{1,2})x|[+-]\s*)(\d{1,3})(?=$|[. _+()\[\]-]|e\d)',re.I)
+PAIR_END = re.compile(r'(?:[ ._+-]*(?:s(?P<season>\d{1,2})[ ._-]*)?e|[ ._+-]+(?P<xseason>\d{1,2})x|(?P<bare>[+-])\s*)(?P<number>\d{1,3})(?=$|[. _+()\[\]-]|e\d)',re.I)
 
-def explicit_episodes(leaf,match):
-    season,first=map(int,match.groups())
-    tail=leaf[match.end():]
-    end=PAIR_END.match(tail)
-    if not end:return season,[first]
-    last=int(end[3])
-    if int(end[1] or end[2] or season)!=season or last!=first+1 or PAIR_END.match(tail[end.end():]):
-        return season,[]
-    return season,[first,last]
+def pair_endpoint(tail, leaf):
+    end = PAIR_END.match(tail)
+    if end and end['xseason'] == '2' and end['number'] == '2' and re.search('[а-яё]', leaf, re.I):
+        return None
+    return end
+
+def explicit_episodes(leaf, match):
+    season, first = map(int, match.groups())
+    tail = leaf[match.end():]
+    end = pair_endpoint(tail, leaf)
+    if not end:
+        return season, [first], None
+    if end['bare'] and match.re is not EX:
+        return season, [], 'После номера серии указан номер без маркера E или x'
+    last = int(end['number'])
+    if int(end['season'] or end['xseason'] or season) != season:
+        return season, [], 'В имени указаны разные сезоны'
+    if last != first + 1:
+        return season, [], 'В имени указан диапазон или несоседние серии'
+    if pair_endpoint(tail[end.end():], leaf):
+        return season, [], 'В имени указано больше двух серий'
+    return season, [first, last], None
 
 def episode_files(files, hint=None):
     seasons = {}
@@ -113,7 +126,7 @@ def episode_files(files, hint=None):
         leaf = re.split(r'[/\\]',name)[-1]
         m = file_pair(leaf)
         if m:
-            season,episodes=explicit_episodes(leaf,m)
+            season,episodes,_=explicit_episodes(leaf,m)
         else:
             epmatch = EP.search(leaf) or re.match(r'^(\d{1,3})[ ._-]+', leaf)
             season = season_hint(name) or hint

@@ -208,7 +208,7 @@ public partial class TorBoxController
             // StartSeries/ResolveSeriesStream keeps the selected resolution ceiling and semantic tracks.
             int resolution=watch.Resolution;
             string selection=watch.Selection;
-            var result=await StartSeries(pick,current.File,resolution,audio,sub,selection,key);
+            var result=await StartSeries(pick,current.File,current.Episode,resolution,audio,sub,selection,key);
             RememberFilm(torrent,watch.Film);
             seasonOffers.TryRemove(input.offer,out _);
             return result;

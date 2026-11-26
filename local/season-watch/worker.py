@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from providers import release_summary, measured_tags, HASH, NAMES, VIDEO, Providers, Unavailable, digest, episode_files, season_hint
+from providers import release_summary, measured_tags, HASH, NAMES, VIDEO, Providers, Unavailable, digest, episode_files, season_hint, file_pair, explicit_episodes
 from urllib.parse import quote, urlsplit
 from concurrent.futures import ThreadPoolExecutor
 
@@ -28,13 +28,13 @@ def atomic(path, value):
     finally:
         Path(name).unlink(missing_ok=True)
 
-FILE_PARSER_VERSION=4
+FILE_PARSER_VERSION=5
 
 def state():
     if not STATE.exists():
         return dict(watches={}, files={}, replaced={}, sources={}, identities={}, checked={}, totals={})
     data = json.loads(STATE.read_text())
-    if data.get('parser_version')==3:
+    if data.get('parser_version') in (3,4):
         data['pending_file_index']=list(data.get('files',{}))
     elif data.get('parser_version')!=FILE_PARSER_VERSION:
         data['files']={}
@@ -166,7 +166,7 @@ def indexed_files(p,st,t,place,force=False):
     known=st['files'].get(h,{})
     if known and h not in pending and not force:return known
     raw=t['files'] or (p.ts_files(place,h) if place!='box' else [])
-    if not raw and h in pending:
+    if not raw and (force or h in pending):
         raise Unavailable('Ожидает повторного чтения списка файлов')
     known=episode_files(raw,season_hint(t['label']))
     if known:st['files'][h]=known
@@ -181,6 +181,11 @@ def item_rows(p,st,t,place,force=False):
     hint=season_hint(t['label'])
     if not t['tv'] and not hint and not re.search(r'сезон|s\d{1,2}e\d|Season',t['label'],re.I) and not episode_files(t['files']):
         return []
+    if place=='box' and not t['files']:
+        rows=[dict(w) for w in st['watches'].values() if w['place']==place and w['hash']==h]
+        if not rows:rows=[make_row(t,place,hint or 0,'')]
+        for row in rows:mark_stale(row,'TorBox пока не сообщил список файлов')
+        return rows
     known=indexed_files(p,st,t,place,force)
     if not known:
         return [make_row(t,place,hint or 0,'Не удалось определить серии по файлам')]
@@ -350,6 +355,7 @@ def prune(st):
         st[field]={h:value for h,value in st[field].items() if h in active}
     if 'pending_file_index' in st:
         st['pending_file_index']=[h for h in st['pending_file_index'] if h in active]
+        if not st['pending_file_index']:st.pop('pending_file_index')
     valid=set(st['watches'])
     for place,rows in catalog.items():
         for row in rows:
@@ -598,6 +604,11 @@ def media(p,place,h):
                 numbers=sorted(map(int,episodes))
                 row.update(season=season,episode=numbers[0])
                 if len(numbers)>1:row['episodes']=numbers
+            if 'episode' not in row:
+                match=file_pair(leaf)
+                if match:
+                    reason=explicit_episodes(leaf,match)[2]
+                    if reason:row['episode_note']=reason+'. Файл доступен для ручного просмотра'
         if place!='box':
             row['url']=p.cfg['ts'][place]['url']+'/stream/'+quote(row['name'],safe='')+'?link='+h+'&index='+str(idx)+'&play'
         rows.append(row)
@@ -871,7 +882,8 @@ def update_release(p,st,place,h,season,selection='',confirmation='',actor=None):
     t=enriched(p,st,existing(p,place,h),place)
     if place+':'+h in st['replaced']:
         return dict(message='Эта раздача уже обновлена')
-    known={} if t['movie'] else indexed_files(p,st,t,place)
+    previously_indexed=bool(st['files'].get(h))
+    known={} if t['movie'] else indexed_files(p,st,t,place,force=True)
     if not season and len(known)>1:
         return dict(seasons=sorted(map(int,known),reverse=True))
     if not season and known: season=int(next(iter(known)))
@@ -888,7 +900,7 @@ def update_release(p,st,place,h,season,selection='',confirmation='',actor=None):
         if not tmdb and not t['title']: t=dict(t,title=display_name(t))
         examine(p,st,t,w,old,interactive=True,selection=selection)
         st['watches'][w['id']]=w
-    elif t['tv']:
+    elif t['tv'] or (not t['movie'] and (previously_indexed or season)):
         raise Unavailable('Пока не удалось распознать номера серий')
     else:
         movie_offer(p,st,t,w,selection)

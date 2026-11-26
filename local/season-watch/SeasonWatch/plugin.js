@@ -97,10 +97,10 @@
         }
         function play(c) {
             withMedia(c,function (files,r) {
-                function launch(f) {
+                function launch(f,n) {
                     function open(address) {
                         if (!current()) return;
-                        var cell={url:address,title:f.name,torrent_hash:c.hash,timeline:false};
+                        var cell={url:address,title:n?number(f.season,n)+' · '+f.name:f.name,torrent_hash:c.hash,timeline:false};
                         Lampa.Player.play(cell);
                         Lampa.Player.playlist(c.place==='box'?[cell]:files.map(function (x) {
                             return x===f?cell:{url:x.url,title:x.name,torrent_hash:c.hash,timeline:false};
@@ -116,11 +116,11 @@
                     var pair=pairLabel(f);
                     if (pair) {
                         f.episodes.forEach(function (n) {
-                            rows.push({title:number(f.season,n),subtitle:pair+' · '+safe(f.name),run:function () {launch(f);}});
+                            rows.push({title:number(f.season,n),subtitle:pair+' · '+safe(f.name),run:function () {launch(f,n);}});
                         });
-                    } else rows.push({title:safe(f.name),subtitle:safe(f.path!==f.name?f.path.slice(0,-f.name.length):''),run:function () {launch(f);}});
+                    } else rows.push({title:safe(f.name),subtitle:safe([f.episode_note,f.path!==f.name?f.path.slice(0,-f.name.length):''].filter(Boolean).join(' · ')),run:function () {launch(f);}});
                 });
-                if (rows.length===1) return launch(files[0]);
+                if (rows.length===1 && !files[0].episode_note) return launch(files[0]);
                 select('Выберите файл',rows,back);
             });
         }
@@ -168,9 +168,9 @@
                             return {title:item.title,subtitle:safe((all?c.release_summary:file.release_summary)||''),run:function () {if (active()) {back();item.onSelect();}}};
                         }),files.length===1?close:chooseFile);
                     }
-                    if (files.length===1) return modes(files[0],false);
+                    if (files.length===1 && !files[0].episode_note) return modes(files[0],false);
                     var rows=[{title:'Все видеофайлы',run:function () {modes(files[0],true);}}];
-                    files.forEach(function (f) {rows.push({title:safe(f.name),subtitle:safe([pairLabel(f),f.path!==f.name?f.path:'',f.release_summary].filter(Boolean).join(' · ')),run:function () {modes(f,false);}});});
+                    files.forEach(function (f) {rows.push({title:safe(f.name),subtitle:safe([pairLabel(f),f.episode_note,f.path!==f.name?f.path:'',f.release_summary].filter(Boolean).join(' · ')),run:function () {modes(f,false);}});});
                     select('Infuse · '+c.title,rows,close);
                 }
                 if (window.lampac_infuse_saver && window.lampac_infuse_saver.menu) chooseFile();

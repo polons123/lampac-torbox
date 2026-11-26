@@ -484,17 +484,38 @@ try:
     initial()
     watch = api("/torbox/series/followed")[1]["items"][0]["id"]
 
-    def open_file(file):
+    def menu_urls(html):
+        return [json.loads(value).get("url", "") for value in re.findall("data-json='([^']+)'", html)]
+
+    def open_file(file, number=0):
         rows[:] = [row(A)]
         reset()
         code, raw = get("/lite/torbox?serial=1&title=Mock%20Show&year=2020")
         ticket = re.search(r"choose\?pick=([a-f0-9]{32})", raw)[1]
         code, choice = get("/lite/torbox/choose?pick=" + ticket)
-        get("/lite/torbox/choose?pick=" + ticket + "&file=" + str(file))
-        code, j = api("/lite/torbox/play?pick=" + ticket + "&file=" + str(file) + "&resolution=720&audio=0&sub=0")
+        selected = "&file=" + str(file) + "&number=" + str(number)
+        code, menu = get("/lite/torbox/choose?pick=" + ticket + selected)
+        assert code == 200 and (not number or any(f"&number={number}" in url for url in menu_urls(menu)))
+        code, j = api("/lite/torbox/play?pick=" + ticket + selected + "&resolution=720&audio=0&sub=0")
         assert code == 200, (code, j)
         return j, choice
 
+    items[10]["files"] = [{"id": 1, "name": "Mock.Show.S01E01E02.mkv"},
+                          {"id": 3, "name": "Сериал.S01E03.2x2.mkv"},
+                          {"id": 4, "name": "Mock.Show.S01E04-5.mkv"}]
+    for number in [1, 2]:
+        playback, menu = open_file(1, number)
+        session = playback["torbox_series"]
+        check("paired file selected as E" + str(number), playback["url"].endswith("/1.m3u8") and
+              [e["episode"] for e in session["items"]] == [number, 3] and session["selected_index"] == 0)
+        check("both episode links refer to one file", all(any(f"file=1&number={n}" in url for url in menu_urls(menu)) for n in [1, 2]))
+    reset()
+    code, pack = get("/lite/torbox?serial=1&title=Mock%20Show&tb_season=1&tb_episode=2")
+    ticket = re.search(r"choose\?pick=([a-f0-9]{32})", pack)[1]
+    code, quality = get("/lite/torbox/choose?pick=" + ticket)
+    check("requested E02 opens the paired file directly", code == 200 and any("file=1&number=2" in u for u in menu_urls(quality)))
+    code, followed = api("/torbox/series/updates?id=" + watch)
+    check("follow knows both episodes of the pair", code == 200 and followed["last_episode"] == 2 and followed["new_episodes"] == [])
     items[10]["files"] = [{"id": 1, "name": "Mock.Show.S01E01.A.mkv"}, {"id": 4, "name": "Mock.Show.S01E01.B.mkv"}, {"id": 2, "name": "Mock.Show.S01E02.A.mkv"}, {"id": 5, "name": "Mock.Show.S01E02.B.mkv"}]
     j, choice = open_file(4)
     check("manual choices retain both variants", "S01E01.A" in choice and "S01E01.B" in choice)

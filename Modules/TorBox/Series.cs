@@ -45,6 +45,13 @@ public partial class TorBoxController
         return 0;
     }
     static string NaturalOrder(string text) => Regex.Replace((text??"").ToLowerInvariant(),@"\d+",m=>m.Value.PadLeft(12,'0'));
+    static readonly Regex PairEnd = new(@"\G(?:[ ._+-]*(?:s(?<season>\d{1,2})[ ._-]*)?e|[ ._+-]+(?<xseason>\d{1,2})x|(?<bare>[+-])\s*)(?<number>\d{1,3})(?=$|[. _+()\[\]-]|e\d)",RegexOptions.IgnoreCase);
+    static Match PairEndpoint(string leaf,int start) {
+        var end=PairEnd.Match(leaf,start);
+        if(!end.Success)return null;
+        if(end.Groups["xseason"].Value=="2" && end.Groups["number"].Value=="2" && Regex.IsMatch(leaf,@"[а-яё]",RegexOptions.IgnoreCase))return null;
+        return end;
+    }
     static List<SeriesEpisode> EpisodeFiles(Pick pick,JToken torrent) {
         var result=new List<SeriesEpisode>();
         int hint=SeasonHint(pick.Name);
@@ -52,16 +59,24 @@ public partial class TorBoxController
             string name=(string)file["name"]??FileName(file);
             string leaf=name.Replace('\\','/').Split('/').Last();
             var match=Regex.Match(leaf,@"(?<![\p{L}\p{N}])S(\d{1,2})[ ._-]*E(\d{1,3})(?!\d)",RegexOptions.IgnoreCase);
-            if(!match.Success) {
+            bool xForm=!match.Success;
+            if(xForm) {
                 string numbered=Regex.IsMatch(leaf,@"[а-яё]",RegexOptions.IgnoreCase)
-                    ? Regex.Replace(leaf,@"(?<!\d)2x2(?!\d)"," ",RegexOptions.IgnoreCase) : leaf;
+                    ? Regex.Replace(leaf,@"(?<!\d)2x2(?!\d)","   ",RegexOptions.IgnoreCase) : leaf;
                 match=Regex.Match(numbered,@"(?<!\d)(\d{1,2})x(\d{1,3})(?!\d)",RegexOptions.IgnoreCase);
             }
-            int season=0,episode=0;
+            int season=0,episode=0,last=0;
             if(match.Success) {
                 season=int.Parse(match.Groups[1].Value);
                 episode=int.Parse(match.Groups[2].Value);
                 if(episode<1)continue;
+                var end=PairEndpoint(leaf,match.Index+match.Length);
+                if(end!=null) {
+                    var repeated=end.Groups["season"].Success?end.Groups["season"]:end.Groups["xseason"];
+                    last=int.Parse(end.Groups["number"].Value);
+                    if((end.Groups["bare"].Success && !xForm) || (repeated.Success && int.Parse(repeated.Value)!=season) ||
+                        last!=episode+1 || PairEndpoint(leaf,end.Index+end.Length)!=null)continue;
+                }
             } else {
                 season=SeasonHint(name);if(season==0)season=hint>0?hint:1;
                 match=Regex.Match(leaf,@"(?:\bE(?:p(?:isode)?)?[ ._-]*|\bСерия[ ._:-]*)(\d{1,3})(?!\d)|(?<!\d)(\d{1,3})[ ._-]*(?:серия|серии|эпизод)",RegexOptions.IgnoreCase);
@@ -73,7 +88,8 @@ public partial class TorBoxController
                 }
             }
             if(season<1)continue;
-            result.Add(new SeriesEpisode{Pick=pick,File=(long?)file["id"]??-1,Season=season,Episode=episode,Numbered=episode>0,Name=FileName(file)});
+            foreach(int number in last>0?new[]{episode,last}:new[]{episode})
+                result.Add(new SeriesEpisode{Pick=pick,File=(long?)file["id"]??-1,Season=season,Episode=number,Numbered=number>0,Name=FileName(file)});
         }
         foreach(var group in result.GroupBy(e=>e.Season)) {
             if(group.All(e=>e.Episode==0)){int ordinal=0;foreach(var e in group)e.Episode=++ordinal;}
@@ -83,6 +99,9 @@ public partial class TorBoxController
     }
     static string EpisodeVariant(string name) {
         string text=Regex.Replace(name??"",@"\.[a-z0-9]{2,4}$","",RegexOptions.IgnoreCase);
+        var first=Regex.Match(text,@"(?<![\p{L}\p{N}])S\d{1,2}[ ._-]*E\d{1,3}(?!\d)|(?<!\d)\d{1,2}x\d{1,3}(?!\d)",RegexOptions.IgnoreCase);
+        if(first.Success && PairEndpoint(text,first.Index+first.Length) is Match end)
+            text=text.Remove(end.Index,end.Length);
         text=Regex.Replace(text,@"(?<![\p{L}\p{N}])S\d{1,2}[ ._-]*E\d{1,3}(?!\d)"," ",RegexOptions.IgnoreCase);
         text=Regex.Replace(text,@"(?<!\d)\d{1,2}x\d{1,3}(?!\d)"," ",RegexOptions.IgnoreCase);
         text=Regex.Replace(text,@"(?:\bE(?:p(?:isode)?)?[ ._-]*|\bСерия[ ._:-]*)\d{1,3}(?!\d)|(?<!\d)\d{1,3}[ ._-]*(?:серия|серии|эпизод)"," ",RegexOptions.IgnoreCase);
@@ -102,17 +121,22 @@ public partial class TorBoxController
         int at=groups.FindIndex(g=>g.Key==chosen.Episode);
         var picked=new List<SeriesEpisode>();
         if(at<0){picked.Add(chosen);return picked;}
+        var used=new HashSet<long>{chosen.File};
         for(int i=at-1;i>=0;i--) {
+            if(groups[i].Any(e=>used.Contains(e.File)))continue;
             var take=MatchEpisodeVariant(groups[i].ToList(),variant);
             if(take==null)break;
+            used.Add(take.File);
             picked.Insert(0,take);
         }
         var chosenFiles=groups[at].ToList();
         picked.Add(chosenFiles.FirstOrDefault(e=>e.File==chosen.File)??chosen);
         for(int i=at+1;i<groups.Count;i++) {
             var files=groups[i].ToList();
+            if(files.Any(e=>used.Contains(e.File)))continue;
             var take=MatchEpisodeVariant(files,variant);
             if(take==null){if(files.Count>1)choice=files;break;}
+            used.Add(take.File);
             picked.Add(take);
         }
         return picked;
@@ -203,11 +227,11 @@ public partial class TorBoxController
         return Payload(new{success=true,torbox_stream=true,url=stream.Url,quality=new JObject(),hls_manifest_timeout=60000,
             torbox_series=SeriesInfo(session,state,index,version),selection_notice=stream.Notice??followNotice});
     }
-    async Task<ActionResult> StartSeries(Pick pick,long file,int resolution,int audio,int sub,string selection,string key) {
+    async Task<ActionResult> StartSeries(Pick pick,long file,int number,int resolution,int audio,int sub,string selection,string key) {
         foreach(var expired in seriesSessions.Where(x=>x.Value.Expires<DateTime.UtcNow).ToArray())seriesSessions.TryRemove(expired.Key,out _);
         if(seriesSessions.Count>=256)return Error(429,"Слишком много открытых сериалов. Попробуйте позднее");
         var episodes=EpisodeFiles(pick,pick.Torrent);
-        var current=episodes.FirstOrDefault(e=>e.File==file);
+        var current=episodes.FirstOrDefault(e=>e.File==file && (number==0 || e.Episode==number));
         if(current==null)return Error(400,"Не удалось определить выбранную серию");
         current.ExplicitAudio=audio;current.ExplicitSub=sub;
         var known=pick.Metadata[file];
@@ -247,7 +271,7 @@ public partial class TorBoxController
             int sub=state.Subtitle==null?-1:MatchSeriesTrack(state.Subtitle,subs,false);
             if(audio<0 || (state.Subtitle!=null && sub<0))
                 return Error(409,"В выбранном файле нет выбранного перевода или дорожки субтитров. Выберите параметры заново через Онлайн → TorBox");
-            return await StartSeries(pick,file,state.Resolution,audio,sub,state.Selection,key);
+            return await StartSeries(pick,file,offered.Episode,state.Resolution,audio,sub,state.Selection,key);
         } finally { state.Gate.Release(); }
     });
     [HttpGet,Route("torbox/series/advance")]
