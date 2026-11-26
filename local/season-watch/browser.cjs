@@ -19,7 +19,7 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
     const server=http.createServer((q,r)=>{
         const route=new URL(q.url,'http://localhost').pathname;
         if(route==='/season-watch/list') {r.setHeader('Content-Type','application/json');return r.end(JSON.stringify(fixture));}
-        if(route==='/season-watch/catalog') {r.setHeader('Content-Type','application/json');return r.end(JSON.stringify({cards:['peer','home','box'].map((place,i)=>({place,hash:String(i).repeat(40),box_id:place==='box'?77:null,identities:place==='peer' && !identities?[{value:'22',label:'Show (2024)'}]:[],title:'Test '+place,label:'1080p',poster:'',year:'2026',movie:i===1,seasons:i===1?[]:[{n:2,ready:[3],waiting:[],tmdb:3}]})).filter(c=>!gone.has(c.place)),errors:{}}));}
+        if(route==='/season-watch/catalog') {r.setHeader('Content-Type','application/json');return r.end(JSON.stringify({cards:['peer','home','box'].map((place,i)=>({place,hash:String(i).repeat(40),box_id:place==='box'?77:null,identities:place==='peer' && !identities?[{value:'22',label:'Show (2024)'}]:[],title:'Test '+place,label:'1080p',release_summary:'1080p · WEB-DLRip',poster:'',year:'2026',movie:i===1,seasons:i===1?[]:[{n:2,ready:[3],waiting:[],tmdb:3}]})).filter(c=>!gone.has(c.place)),errors:{}}));}
         if(route==='/season-watch/remove' || route==='/season-watch/remove/check') {
             let data='';q.on('data',c=>data+=c);q.on('end',()=>{
                 const body=JSON.parse(data);r.setHeader('Content-Type','application/json');
@@ -49,7 +49,7 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
             if(!infuseMedia) return r.end(JSON.stringify({files:[{id:1,name:'episode.mkv',path:'episode.mkv',url:'https://fixture.invalid/video'}],box_id:77}));
             const place=new URL(q.url,'http://localhost').searchParams.get('place');
             const movie=place==='home'?{title:'Film',id:55,release_date:'2024-01-01'}:{media_type:'tv',name:'Шоу',original_name:'Show',first_air_date:'2025-01-01'};
-            const files=Array.from({length:place==='home'?1:9},(_,i)=>({id:i,name:'File '+(i+1)+'.mkv',path:'pack/File '+(i+1)+'.mkv',season:2,episode:i+1,url:place==='box'?undefined:'https://'+place+'.invalid/'+i}));
+            const files=Array.from({length:place==='home'?1:9},(_,i)=>({id:i,name:'File '+(i+1)+'.mkv',path:'pack/File '+(i+1)+'.mkv',release_summary:'720p · AVC',season:2,episode:i+1,url:place==='box'?undefined:'https://'+place+'.invalid/'+i}));
             return r.end(JSON.stringify({movie,files,box_id:place==='box'?77:null}));
         }
         if(route==='/torbox/play') {r.setHeader('Content-Type','application/json');return r.end('{"success":true,"url":"https://fixture.invalid/box"}');}
@@ -94,8 +94,15 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
         await until("Lampa.Activity.active()?.component==='main'");
         await delay(1800);
         await ev("window.testMenus=[];window.notes=[];var origNoty=Lampa.Noty.show;Lampa.Noty.show=function(m){notes.push(m);return origNoty(m);};var actualSelect=Lampa.Select.show;Lampa.Select.show=function(o){testMenus.push(o);return actualSelect(o);};");
+        await ev(fs.readFileSync(path.join(__dirname,'../../Modules/TorBox/plugin.js'),'utf8').replace('{localhost}',origin));
         await ev(fs.readFileSync(path.join(__dirname,'SeasonWatch/plugin.js'),'utf8').replace('{localhost}',origin));
         await until("document.querySelector('[data-action=all_releases] span')?.textContent==='1'");
+        assert(await ev(`['my_torbox','all_releases'].every(action => {
+            const item = document.querySelector('.menu [data-action=' + action + ']');
+            return item && getComputedStyle(item).display !== 'none';
+        })`), 'My TorBox and All Releases must both be visible in the sidebar');
+        await ev("$('[data-action=my_torbox]').trigger('hover:enter')");
+        await until("Lampa.Activity.active()?.component==='my_torbox'");
         await ev("window.playCalls=[];Lampa.Player.play=function(c){playCalls.push(c.url)}; Lampa.Player.playlist=function(){}");
         await ev("$('[data-action=all_releases]').trigger('hover:enter')");
         await until("$('.all-releases-card').length===3");
@@ -153,6 +160,8 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
             await until("testMenus.at(-1).items.some(x=>x.title.includes('infuseSaver'))");
             const labels=await ev("testMenus.at(-1).items.map(x=>$(x.title).text().trim())");
             assert(labels.includes('Редактировать и сохранить'),JSON.stringify(labels));
+            const metadata=await ev("testMenus.at(-1).items[0].subtitle");
+            assert.equal(metadata,place==='box'?'1080p · WEB-DLRip':'720p · AVC');
             const count=saves.length;
             await saveMode(place==='box'?'Сохранить все':'Сохранить');
             for(let n=0;n<100 && saves.length===count;n++)await delay(50);
@@ -192,7 +201,7 @@ const delay = ms => new Promise(r => setTimeout(r,ms));
             assert.equal(req.box_id,req.place==='box'?77:null);
         }
         assert.equal(deletions.length,3);assert.equal(checks,1);
-        console.log('PASS InfuseSaver movie, episode, bulk, TorBox batches and incomplete reply; playback/update/delete regression');
+        console.log('PASS My TorBox and All Releases sidebar entries, InfuseSaver, playback, updates and deletion');
     } finally {
         if(ws)ws.close();chrome.kill();server.close();await delay(500);fs.rmSync(profile,{recursive:true,force:true,maxRetries:3});
     }

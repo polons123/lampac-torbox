@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from providers import HASH, NAMES, VIDEO, Providers, Unavailable, digest, episode_files, season_hint
+from providers import release_summary, measured_tags, HASH, NAMES, VIDEO, Providers, Unavailable, digest, episode_files, season_hint
 from urllib.parse import quote, urlsplit
 from concurrent.futures import ThreadPoolExecutor
 
@@ -32,7 +32,7 @@ def state():
     if not STATE.exists():
         return dict(watches={}, files={}, replaced={}, sources={}, identities={}, checked={}, totals={})
     data = json.loads(STATE.read_text())
-    if data.get('parser_version') != 2:
+    if data.get('parser_version') != 3:
         data['files'] = {}
     return data
 
@@ -127,6 +127,10 @@ def examine(p,st,t,w,old,interactive=False,selection=''):
             st['sources'][key]=binding
     known_height=height(t['label'])
     relevant=[r for r in choices if not known_height or (height(r['label']) or r['height']) in (0,known_height)]
+    def missing_claim(row):
+        tags=row.get('tags') or {}
+        return tags.get('seasons')==[season] and bool(missing.intersection(tags.get('episodes') or []))
+    relevant.sort(key=missing_claim,reverse=True)
     unique={choice_id(r):r for r in relevant}
     w['choices']=[dict(value=k,label=r['label']+' · '+r['tracker']) for k,r in unique.items()]
     if selection:
@@ -193,6 +197,54 @@ def mark_stale(row, reason):
     row.update(stale=True,detail=reason)
     row.pop('candidate',None)
 
+def lookup_release(p,t,timeout=18):
+    name=t['title'] or display_name(t)
+    original=t.get('original') or name
+    year=int(t.get('year') or 0) if t['movie'] else 0
+    queries=[(name,original,t['movie'],year)]
+    # A user-selected movie card and the actual release may name different films.
+    release,release_year=release_name(t['label'])
+    if t['movie'] and release and release_year and (normalize(release) not in {normalize(name),normalize(original)} or int(release_year)!=year):
+        queries.append((release,release,True,int(release_year)))
+    deadline=time.monotonic()+timeout
+    for query in queries:
+        remaining=deadline-time.monotonic()
+        if remaining<=0:raise Unavailable('Истекло время поиска меток')
+        for row in p.jac(*query,timeout=remaining):
+            if row['hash']==t['hash'] and (row.get('tags') or row.get('measured')):
+                return {'tags':row.get('tags') or {},'measured':row.get('measured') or {}}
+    return {}
+
+def live_metadata(p,t,cache,updates,deadline):
+    h=t['hash']
+    current=updates.get(h) or cache.get(h) or {}
+    if current.get('tags') or current.get('measured') or current.get('retry_after',0)>time.time():
+        return current
+    left=deadline-time.monotonic()
+    if left>0:
+        try:
+            updates[h]=lookup_release(p,t,min(2,left)) or {'retry_after':int(time.time())+300}
+            return updates[h]
+        except ERRORS:
+            pass
+    return current
+
+def cache_metadata(updates,previous):
+    if not updates:return
+    # Merge just these hashes under the same lock as scheduled scans and library edits.
+    try:
+        with (ROOT/'worker.lock').open('a') as lock:
+            try:fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:return
+            latest=json.loads(STATE.read_bytes()) if STATE.exists() else state()
+            cache=latest.setdefault('release_metadata',{})
+            for h,value in updates.items():
+                if cache.get(h)==previous.get(h):cache[h]=value
+            atomic(STATE,latest)
+    except OSError as exc:
+        print(f'release metadata cache: {type(exc).__name__}',file=sys.stderr)
+
+
 def scan(p,st):
     for group,job in list(st.get('removal_groups',{}).items()):
         if not job.get('failed') and job['due']<=time.time():
@@ -208,7 +260,14 @@ def scan(p,st):
         now=int(time.time())
         try:
             inventory=[enriched(p,st,t,place) for t in p.inventory(place)]
-            cards=[card(t,place) for t in inventory]
+            metadata=st.setdefault('release_metadata',{})
+            for t in inventory:
+                try:
+                    exact=lookup_release(p,t)
+                    if exact:metadata[t['hash']]=exact
+                except ERRORS as exc:
+                    print(f'{place} release metadata: {type(exc).__name__}',file=sys.stderr)
+            cards=[card(t,place,metadata.get(t['hash'])) for t in inventory]
         except ERRORS as err:
             print(f'{place} inventory: {type(err).__name__}',file=sys.stderr)
             st['checked'][place]={'error':optional_label(err),'time':now}
@@ -248,7 +307,8 @@ def prune(st):
         return
     if st.get('removal_groups') or st.get('deletions'): return
     active={row['hash'] for rows in catalog.values() for row in rows}
-    for field in ('files','identities'):
+    for field in ('files','identities','release_metadata'):
+        st.setdefault(field,{})
         st[field]={h:value for h,value in st[field].items() if h in active}
     valid=set(st['watches'])
     for place,rows in catalog.items():
@@ -260,7 +320,7 @@ def prune(st):
 
 def save(st):
     # Convert season keys to a common on-disk representation on every write.
-    st['parser_version']=2
+    st['parser_version']=3
     atomic(STATE,st)
     public=[]
     for w in st['watches'].values():
@@ -392,7 +452,7 @@ def film_input(t):
 def remember_card(st,t,place):
     rows=st.setdefault('catalog',{}).setdefault(place,[])
     rows[:]=[c for c in rows if c['hash']!=t['hash']]
-    rows.append(card(t,place))
+    rows.append(card(t,place,st.get('release_metadata',{}).get(t['hash'])))
 
 def set_film(p,st,place,h,kind,value,actor):
     t=existing(p,place,h)
@@ -421,19 +481,30 @@ def set_film(p,st,place,h,kind,value,actor):
         save(st)
     return dict(message='Карточка сохранена' if fields['poster'] else 'Карточка сохранена. У TMDB пока нет постера',hash=h)
 
-def card(t,place):
+def card(t,place,metadata=None):
+    meta=metadata or {}
+    videos=[f for f in t.get('files',[]) if VIDEO.search(f.get('path') or f.get('name') or '')]
+    measured=meta.get('measured') if len(videos)==1 else None
     return dict(place=place,hash=t['hash'],title=t['title'] or display_name(t),label=t['label'][:400],
+        release_summary=release_summary(meta.get('tags'),t['label'],measured),
         poster=poster_url(t.get('poster')),year=t.get('year',''),movie=t['movie'],tv=t['tv'],tmdb=t.get('tmdb'),original=t.get('original'),
         box_id=t['raw'].get('id') if place=='box' else None)
 
 def catalog(p,st):
+    metadata=st.get('release_metadata',{})
+    updates={}
     cards=[]
     errors={}
     with ThreadPoolExecutor(max_workers=len(NAMES)) as pool:
         jobs={place:pool.submit(p.inventory,place) for place in NAMES}
+        deadline=None
         for place,job in jobs.items():
             try:
-                items=[card(enriched(p,st,t,place),place) for t in job.result()]
+                items=[]
+                for torrent in job.result():
+                    t=enriched(p,st,torrent,place)
+                    if deadline is None:deadline=time.monotonic()+6
+                    items.append(card(t,place,live_metadata(p,t,metadata,updates,deadline)))
             except ERRORS as exc:
                 errors[place]=optional_label(exc)
                 items=st.get('catalog',{}).get(place,[])
@@ -445,6 +516,7 @@ def catalog(p,st):
                 data['identities']=next((w['identities'] for w in watches if w.get('identities')),[])
                 data['seasons']=sorted([dict(stale=w.get('stale',False) or place in errors,asof=w.get('asof'),n=w['season'],id=w['id'],ready=w['ready'],waiting=w['waiting'],tmdb=w.get('tmdb')) for w in watches if w['season']],key=lambda x:x['n'])
                 cards.append(data)
+    cache_metadata(updates,metadata)
     grouped=grouped_receipts(st)
     pending={k:r for k,r in st.get('deletions',{}).items() if k not in grouped}
     pending.update({k:j for k,j in st.get('removal_groups',{}).items() if not j.get('failed')})
@@ -465,11 +537,21 @@ def media(p,place,h):
     files=t['files'] or (p.ts_files(place,h) if place!='box' else [])
     rows=[]
     hint=season_hint(t['label'])
+    metadata=state().get('release_metadata',{})
+    updates={}
+    meta=live_metadata(p,t,metadata,updates,time.monotonic()+4)
+    cache_metadata(updates,metadata)
+    videos=[f for f in files if VIDEO.search(f.get('path') or f.get('name') or '')]
     for f in files:
         name=f.get('path') or f.get('name') or ''
         if not VIDEO.search(name) or f.get('id') is None: continue
         idx=int(f['id'])
-        row=dict(name=name.rsplit('/',1)[-1],path=name,id=idx)
+        streams=f.get('ffprobe') or []
+        measured=measured_tags(streams) if streams else (meta.get('measured') if len(videos)==1 else None)
+        summary=release_summary(meta.get('tags'),name,measured)
+        if summary and len(videos)>1 and meta.get('tags') and not measured:
+            summary='Раздача · '+summary
+        row=dict(name=re.split(r'[/\\]',name)[-1],path=name,id=idx,release_summary=summary)
         if not t['movie']:
             for season,episodes in episode_files([f],hint).items():
                 row.update(season=season,episode=int(next(iter(episodes))))

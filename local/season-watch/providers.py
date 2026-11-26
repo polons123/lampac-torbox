@@ -71,9 +71,24 @@ def valid_hash(value, operation):
 def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
+ORDINALS = ('первый','второй','третий','четвертый','пятый','шестой','седьмой','восьмой','девятый','десятый')
+WORD_SEASON = re.compile(r'\b('+'|'.join(ORDINALS)+r')[ ._-]+сезон\b',re.I)
+
 def season_hint(name):
-    m = SEASON.search(name)
-    return int(m.group(1) or m.group(2)) if m else None
+    for part in reversed(re.split(r'[/\\]',name)):
+        m = SEASON.search(part)
+        if m: return int(m.group(1) or m.group(2))
+        m = WORD_SEASON.search(part.lower().replace('ё','е'))
+        if m: return ORDINALS.index(m.group(1))+1
+    return None
+
+def file_pair(leaf):
+    explicit = SE.search(leaf)
+    if explicit: return explicit
+    for match in EX.finditer(leaf):
+        if match[0].lower()=='2x2' and re.search('[а-яё]',leaf,re.I): continue
+        return match
+    return None
 
 def episode_files(files, hint=None):
     seasons = {}
@@ -82,8 +97,8 @@ def episode_files(files, hint=None):
         size = int(f.get('length') or f.get('size') or 0)
         if not VIDEO.search(name) or BAD.search(name) or size <= 0:
             continue
-        leaf = name.rsplit('/', 1)[-1]
-        m = SE.search(leaf) or EX.search(leaf)
+        leaf = re.split(r'[/\\]',name)[-1]
+        m = file_pair(leaf)
         if m:
             season, ep = map(int, m.groups())
             # Multiple episodes in one file require a manual decision.
@@ -98,6 +113,40 @@ def episode_files(files, hint=None):
         if ep > 0 and season > 0:
             seasons.setdefault(season, {}).setdefault(str(ep), []).append([leaf, size])
     return seasons
+
+def measured_tags(streams):
+    video = next((s for s in streams if s.get('codec_type')=='video' and s.get('height')), {})
+    audio = [s for s in streams if s.get('codec_type')=='audio']
+    channels = {1:'1.0',2:'2.0',6:'5.1',8:'7.1'}
+    tags = {}
+    if video.get('height'): tags['resolution']=str(video['height'])+'p'
+    if video.get('codec_name'): tags['codec']=video['codec_name']
+    formats = list(dict.fromkeys(s['codec_name'] for s in audio if s.get('codec_name')))
+    layouts = list(dict.fromkeys(s.get('channel_layout') or channels.get(s.get('channels')) for s in audio))
+    if formats: tags['audio']=formats
+    if any(layouts): tags['channels']=[v for v in layouts if v]
+    return tags
+
+def release_summary(tags, label='', measured=None):
+    data=dict(tags or {})
+    for key,pattern in [('resolution',r'(?<!\d)(2160|1440|1080|720|576|480)[pр]'),('source',r'\b(WEB[- .]?DLRip|WEB[- .]?DL|WEBRip|BluRay|BDRemux|BDRip|DVDRip)\b'),('codec',r'\b(HEVC|AVC|AV1|[HX][ .-]?26[45])\b')]:
+        if not data.get(key):
+            match=re.search(pattern,label,re.I)
+            if match:data[key]=match[1]+('p' if key=='resolution' else '')
+    data.update(measured or {})
+    parts=[]
+    aliases={'4k':'2160p','hevc':'HEVC','h265':'HEVC','x265':'HEVC','h264':'AVC','x264':'AVC','avc':'AVC','av1':'AV1','dv':'Dolby Vision','eac3':'DD+','ac3':'AC-3'}
+    for key in ('resolution','source','hdr','codec','audio','channels','editions'):
+        values=data.get(key) or []
+        for val in values if isinstance(values,list) else [values]:
+            text=str(val)
+            parts.append(aliases.get(text.casefold(),text))
+    if data.get('dubbed') or data.get('dubLabel'):
+        parts.append('дубляж'+(' ('+str(data['dubLabel'])+')' if data.get('dubLabel') else ''))
+    for key,prefix in [('originalAudioLanguages','оригинал '),('subtitleLanguages','субтитры ')]:
+        if data.get(key):parts.append(prefix+', '.join(str(v).upper() for v in data[key]))
+    if data.get('subbed') and not data.get('subtitleLanguages'): parts.append('субтитры')
+    return ' · '.join(dict.fromkeys(parts))
 
 def unpack_ts(item):
     try:
@@ -240,13 +289,13 @@ class Providers:
         if '/season/' in path: records(result.get('episodes'),'TMDB episodes')
         return result
 
-    def jac(self, title, original, movie=False, year=0):
+    def jac(self, title, original, movie=False, year=0, *, timeout=18):
         key = ('jac',title,original,movie,year)
         if key in self.memo:
             return self.memo[key]
         c = self.cfg['jacred']
         data = http(c['base_url'].rstrip('/') + '/api/v2.0/indexers/all/results?' + parse.urlencode(
-            dict(title=title,title_original=original or title,year=year,is_serial=1 if movie else 2,apikey=c['api_key'])))
+            dict(title=title,title_original=original or title,year=year,is_serial=1 if movie else 2,apikey=c['api_key'])),timeout=timeout)
         rows=records(checked(data,dict,'JacRed search').get('Results'),'JacRed results')
         out = []
         for row in rows:
@@ -263,7 +312,8 @@ class Providers:
             streams = row.get('ffprobe') or []
             height = max([int(s.get('height') or 0) for s in streams if s.get('codec_type')=='video'] or [0])
             out.append(dict(hash=m.group(1).lower(), page=page, tracker=u.hostname, label=row.get('Title') or '',
-                seasons=info.get('seasons') or [], height=height, title=info.get('name') or '', original=info.get('originalname') or ''))
+                tags=info.get('releaseTags') or {}, measured=measured_tags(streams),
+                seasons=(info.get('releaseTags') or {}).get('seasons') or info.get('seasons') or [], height=height, title=info.get('name') or '', original=info.get('originalname') or ''))
         self.memo[key]=out
         return out
 

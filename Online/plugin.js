@@ -341,6 +341,11 @@
             Lampa.Select.close();
             _this.reset();
             _this.request(filteredUrl);
+          } else if (a.stype === 'torbox_match_group' && torboxVoiceMenu) {
+            var groupUrl = _this.torboxVoiceUrl(torboxVoiceMenu.search).replace(/([?&])tb_possible=(true|false)/, '$1tb_possible=' + b.value);
+            Lampa.Select.close();
+            _this.reset();
+            _this.request(groupUrl);
           } else if (a.stype === 'torbox_episode' && torboxVoiceMenu) {
             _this.torboxSelectEpisode(b.clear);
           } else if (a.stype === 'torbox_voice' && torboxVoiceMenu) {
@@ -1423,6 +1428,9 @@
       });
       this.saveChoice(choice);
       if (balanser === 'torbox' && torboxVoiceMenu) {
+        var possible = /[?&]tb_possible=true(?:&|$)/.test(torboxVoiceMenu.search);
+        select.push({ title: 'Совпадения', subtitle: possible ? 'Возможные совпадения' : 'Точные совпадения', stype: 'torbox_match_group',
+          items: [{ title: 'Точные совпадения', value: 'false', selected: !possible }, { title: 'Возможные совпадения', value: 'true', selected: possible }] });
         var voiceOptions = [{ title: 'Все', voice: '', selected: !torboxVoiceMenu.selected }];
         torboxVoiceMenu.options.forEach(function (name) { voiceOptions.push({ title: escapeHtml(name), voice: name, selected: torboxVoiceMenu.selected === name }); });
         select.push({ title: 'Озвучка', subtitle: escapeHtml(torboxVoiceMenu.selected || 'Все'), items: voiceOptions, stype: 'torbox_voice' });

@@ -187,7 +187,7 @@ class Mock(BaseHTTPRequestHandler):
             if state.get("episode_parallel"):
                 state["episode_overlap"] = episode_library_started.wait(timeout=2)
                 return self.respond({"success": True, "data": {A: {"cached": False}, B: {"cached": True}}})
-            return self.respond({"success": True, "data": {h: {"cached": state["cached"]} for h in q.get("hash", [""])[0].split(",")}})
+            return self.respond({"success": True, "data": {h: {"cached": state.get("quality_cache",{}).get(h,state["cached"])} for h in q.get("hash", [""])[0].split(",")}})
         if u.path.endswith("/createstream"):
             state["streams"].append(q)
             if state["stream_fail"]:
@@ -377,8 +377,8 @@ try:
         code, body = api("/lite/pidtor" + query)
         check("PidTor retries a valid empty search with KinoAPI metadata",
               code == 200 and state["kino_search"][3:] == ["Fixture Alternative", "Теория большого взрыва"] and bool(body.get("data")))
-        code, _ = get("/lite/torbox" + query + "&clarification=1")
-        check("manual search remains unchanged", code == 404 and state["kino_search"][5:] == ["Fixture Alternative"])
+        code, html = get("/lite/torbox" + query + "&clarification=1")
+        check("manual search remains unchanged", code == 200 and "choose?pick=" not in html and state["kino_search"][5:] == ["Fixture Alternative"])
         state.pop("kino_search")
         reset()
 
@@ -418,9 +418,9 @@ try:
     check("missing JacRed Results reports a source error", code == 502 and "JacRed" in body["detail"])
     rows = []
     previous_calls = state["parser_calls"]
-    code, body = api(search)
+    code, body = get(search)
     check("empty Results reports no releases after an uncached error",
-          code == 404 and state["parser_calls"] == previous_calls + 1)
+          code == 200 and "tb_possible=false" in body and "choose?pick=" not in body and state["parser_calls"] == previous_calls + 1)
     year_search = "/lite/torbox?title=1917&original_title=1917&year=2019"
     for label, release, expected in [
         ("numeric film title isn't treated as release year", {"Title": "1917 1080p"}, 200),
@@ -430,7 +430,22 @@ try:
     ]:
         rows[:] = [dict(row(A), **release)]
         reset()
-        check(label, get(year_search)[0] == expected)
+        code, html = get(year_search)
+        check(label, code == 200 and ("choose?pick=" in html) == (expected == 200))
+        code, manual = get(year_search+"&tb_possible=true")
+        check(label+" in manual group", code == 200 and ("choose?pick=" in manual) == (expected == 404))
+    fourth="d"*40
+    rows[:] = [dict(row(h),Title="Mock Quality "+str(res)+"p "+name) for h,res,name in [
+        (A,1080,"One"), (B,1080,"Two"), (C,720,"Available"), (fourth,480,"Small")]]
+    state["quality_cache"]={A:True,B:True,C:False,fourth:True}
+    reset()
+    code,html=get("/lite/torbox?title=Mock%20Quality")
+    check("multiple cached HD copies demote SD beneath available 720p",code==200 and html.index("720p Available")<html.index("480p Small"))
+    state["quality_cache"][B]=False
+    reset()
+    code,html=get("/lite/torbox?title=Mock%20Quality")
+    check("scarce HD copies keep cached SD ahead of uncached alternatives",code==200 and html.index("480p Small")<html.index("720p Available"))
+    del state["quality_cache"]
     rows[:] = [dict(row(B), Title="Mock Show S01 2160p Cached"), dict(row(A), Title="Mock Show S01 1080p Own")]
     reset()
     state["episode_parallel"] = True

@@ -153,12 +153,12 @@
                         var menu=saver.menu({element:file,items:files,params:{movie:r.movie},resolve:resolve});
                         if (all) menu=menu.filter(function (item) {return item.infuse_scope!=='single';});
                         select('Infuse · '+(all?c.title:file.name),menu.map(function (item) {
-                            return {title:item.title,run:function () {if (active()) {back();item.onSelect();}}};
+                            return {title:item.title,subtitle:safe((all?c.release_summary:file.release_summary)||''),run:function () {if (active()) {back();item.onSelect();}}};
                         }),files.length===1?close:chooseFile);
                     }
                     if (files.length===1) return modes(files[0],false);
                     var rows=[{title:'Все видеофайлы',run:function () {modes(files[0],true);}}];
-                    files.forEach(function (f) {rows.push({title:safe(f.name),subtitle:safe(f.path!==f.name?f.path:''),run:function () {modes(f,false);}});});
+                    files.forEach(function (f) {rows.push({title:safe(f.name),subtitle:safe([f.path!==f.name?f.path:'',f.release_summary].filter(Boolean).join(' · ')),run:function () {modes(f,false);}});});
                     select('Infuse · '+c.title,rows,close);
                 }
                 if (window.lampac_infuse_saver && window.lampac_infuse_saver.menu) chooseFile();
@@ -229,8 +229,8 @@
             (c.seasons||[]).forEach(function (s) {s.ready.forEach(function (n) {
                 read[eventKey({tmdb:s.tmdb,id:s.id,season:s.n},n)]=true;
             });}); Lampa.Storage.set(seenKey(),read);drawBadge();
-            var rows=[{title:'Смотреть',subtitle:safe(c.label),run:function () {play(c);}},
-                {title:'Сохранить в Infuse',subtitle:names[c.place],run:function () {infuse(c);}},
+            var rows=[{title:'Смотреть',subtitle:safe(c.release_summary || c.label),run:function () {play(c);}},
+                {title:'Сохранить в Infuse',subtitle:safe(c.release_summary || names[c.place]),run:function () {infuse(c);}},
                 {title:'Обновить',subtitle:names[c.place]+' · после успешного обновления прежние версии будут удалены',run:function () {edit(c,0,'');}}];
             rows.push({title:'Уточнить фильм или сериал',run:function () {clarify(c);}});
             if (c.identities && c.identities.length) rows.push({title:'Выбрать сериал в TMDB',run:function () {
@@ -266,7 +266,7 @@
             node.addClass('all-releases-card');
             if (c) {
                 var q=/(?:2160|1080|720|480)[pр]|4K/i.exec(c.label);
-                var info=[names[c.place],q && q[0]].filter(Boolean);
+                var info=[names[c.place],c.release_summary || (q && q[0])].filter(Boolean);
                 (c.seasons||[]).forEach(function (s) {
                     if (s.stale) info.push('Последние данные'+(s.asof?' от '+new Date(s.asof*1000).toLocaleString():''));
                     if (s.ready.length) info.push('Доступна '+s.ready.map(function (n) {return number(s.n,n);}).join(', '));
@@ -282,7 +282,7 @@
     function start() {
         if (entry) return;
         Lampa.Component.add('all_releases',library);
-        $('<style>').text('.menu [data-action="my_torbox"]{display:none!important}.all-releases-source{font-size:.85em;opacity:.85;margin-top:.25em}.all-releases-caption{position:absolute;left:.7em;right:.7em;top:45%;text-align:center;overflow-wrap:anywhere}').appendTo('head');
+        $('<style>').text('.all-releases-source{font-size:.85em;opacity:.85;margin-top:.25em}.all-releases-caption{position:absolute;left:.7em;right:.7em;top:45%;text-align:center;overflow-wrap:anywhere}').appendTo('head');
         entry=$('<li class="menu__item selector" data-action="all_releases"><div class="menu__ico">▤</div><div class="menu__text"></div></li>');
         entry.find('.menu__text').text(title);
         badge=$('<span style="margin-left:.5em"></span>').hide().appendTo(entry);

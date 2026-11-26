@@ -68,6 +68,45 @@ class Tests(unittest.TestCase):
         w.scan(self.p,self.s);w.save(self.s)
     def get(self,place='peer'):
         return self.s['watches'][w.item_id(place,A,2)]
+    def test_file_numbers_and_folder_season(self):
+        files=[dict(name=n,size=100) for n in ['Season 1/Второй сезон/03.mkv','Мультфильм.2x2.mkv','Сериал.2x05.mkv','Show.S02E07-E08.mkv']]
+        self.assertEqual(set(episode_files(files)[2]),{'3','5'})
+
+    def test_metadata_applies_only_to_exact_hash(self):
+        self.p.rows=[dict(jac(B),tags={'source':'WEB-DLRip'}),dict(jac(A),tags={'resolution':'720p'},measured={'resolution':'1080p'})]
+        self.p.items['home'][0]['files']=[file(1)]
+        self.scan()
+        self.assertNotIn(B,self.s['release_metadata'])
+        self.assertIn('1080p',self.s['catalog']['home'][0]['release_summary'])
+        self.assertIn('720p',self.s['catalog']['box'][0]['release_summary'])
+        self.assertNotIn('WEB-DLRip',self.s['catalog']['home'][0]['release_summary'])
+
+    def test_new_movie_gets_exact_tags_on_first_catalog_read(self):
+        def movie(h,label):
+            return dict(torrent(h,[]),title='The Weight',original='The Weight',label=label,
+                        year='2026',movie=True,tv=False,poster='/weight.jpg')
+        self.p.items={'home':[movie(A,'[LAMPA] The Weight'),movie(B,'[LAMPA] Other Film [2022, 2160p]')],'peer':[],'box':[]}
+        def search(title,original,movie,year,**kwargs):
+            if (title,year)==('The Weight',2026):return [dict(jac(A),tags={'source':'WEB-DL','hdr':['SDR']})]
+            if (title,year)==('Other Film',2022):return [dict(jac(B),tags={'source':'BDRemux'})]
+            return []
+        self.p.jac=search
+        cards={c['hash']:c for c in w.catalog(self.p,self.s)['cards']}
+        self.assertEqual(cards[A]['release_summary'],'WEB-DL · SDR')
+        self.assertIn('BDRemux',cards[B]['release_summary'])
+        self.assertNotIn('WEB-DL',cards[B]['release_summary'])
+        with patch.object(self.p,'jac',side_effect=AssertionError('cached hash looked up twice')):
+            self.assertEqual(w.catalog(self.p,w.state())['cards'],list(cards.values()))
+
+    def test_direct_media_gets_tags_before_scan_or_catalog(self):
+        self.p.cfg={'ts':{'home':{'url':'https://home.invalid'}}}
+        t=self.p.items['home'][0]
+        t.update(movie=True,tv=False,year='2026',files=[dict(id=1,name='Film.mkv',size=123)])
+        self.p.rows=[dict(jac(A),tags={'source':'WEB-DL'},measured={'codec':'hevc'})]
+        result=w.media(self.p,'home',A)
+        self.assertEqual(result['files'][0]['release_summary'],'WEB-DL · HEVC')
+        self.assertEqual(w.state()['release_metadata'][A]['measured'],{'codec':'hevc'})
+
     def test_infuse_metadata_and_media_sources(self):
         self.p.cfg={'ts':{p:{'url':'https://'+p+'.invalid'} for p in ('home','peer')}}
         for place in w.NAMES:

@@ -34,8 +34,15 @@ public partial class TorBoxController
     }
     static readonly ConcurrentDictionary<string,SeriesSession> seriesSessions = new();
     static int SeasonHint(string text) {
-        var match=Regex.Match(text??"",@"(?:(?<![\p{L}\p{N}])S|\bSeason[ ._-]*|\bСезон[ ._:-]*)(\d{1,2})(?!\d)|(?<!\d)(\d{1,2})[ ._-]*(?:сезон|season)",RegexOptions.IgnoreCase);
-        return match.Success ? int.Parse(match.Groups[1].Success?match.Groups[1].Value:match.Groups[2].Value) : 0;
+        string[] words={"первый","второй","третий","четвертый","пятый","шестой","седьмой","восьмой","девятый","десятый"};
+        foreach(string part in (text??"").Replace('\\','/').Split('/').Reverse()) {
+            var match=Regex.Match(part,@"(?:(?<![\p{L}\p{N}])S|\bSeason[ ._-]*|\bСезон[ ._:-]*)(\d{1,2})(?!\d)|(?<!\d)(\d{1,2})[ ._-]*(?:сезон|season)",RegexOptions.IgnoreCase);
+            if(match.Success)return int.Parse(match.Groups[1].Success?match.Groups[1].Value:match.Groups[2].Value);
+            var word=Regex.Match(part.ToLowerInvariant().Replace('ё','е'),@"\b([а-я]+)[ ._-]+сезон\b");
+            int number=Array.IndexOf(words,word.Groups[1].Value)+1;
+            if(number>0)return number;
+        }
+        return 0;
     }
     static string NaturalOrder(string text) => Regex.Replace((text??"").ToLowerInvariant(),@"\d+",m=>m.Value.PadLeft(12,'0'));
     static List<SeriesEpisode> EpisodeFiles(Pick pick,JToken torrent) {
@@ -43,18 +50,23 @@ public partial class TorBoxController
         int hint=SeasonHint(pick.Name);
         foreach(var file in (torrent?["files"] as JArray??new JArray()).Where(f=>VideoName(FileName(f))).OrderBy(f=>NaturalOrder((string)f["name"]??FileName(f)))) {
             string name=(string)file["name"]??FileName(file);
-            var match=Regex.Match(name,@"(?<![\p{L}\p{N}])S(\d{1,2})[ ._-]*E(\d{1,3})(?!\d)|(?<!\d)(\d{1,2})x(\d{1,3})(?!\d)",RegexOptions.IgnoreCase);
+            string leaf=name.Replace('\\','/').Split('/').Last();
+            var match=Regex.Match(leaf,@"(?<![\p{L}\p{N}])S(\d{1,2})[ ._-]*E(\d{1,3})(?!\d)",RegexOptions.IgnoreCase);
+            if(!match.Success) {
+                string numbered=Regex.IsMatch(leaf,@"[а-яё]",RegexOptions.IgnoreCase)
+                    ? Regex.Replace(leaf,@"(?<!\d)2x2(?!\d)"," ",RegexOptions.IgnoreCase) : leaf;
+                match=Regex.Match(numbered,@"(?<!\d)(\d{1,2})x(\d{1,3})(?!\d)",RegexOptions.IgnoreCase);
+            }
             int season=0,episode=0;
             if(match.Success) {
-                season=int.Parse(match.Groups[1].Success?match.Groups[1].Value:match.Groups[3].Value);
-                episode=int.Parse(match.Groups[2].Success?match.Groups[2].Value:match.Groups[4].Value);
+                season=int.Parse(match.Groups[1].Value);
+                episode=int.Parse(match.Groups[2].Value);
                 if(episode<1)continue;
             } else {
                 season=SeasonHint(name);if(season==0)season=hint>0?hint:1;
-                match=Regex.Match(name,@"(?:\bE(?:p(?:isode)?)?[ ._-]*|\bСерия[ ._:-]*)(\d{1,3})(?!\d)|(?<!\d)(\d{1,3})[ ._-]*(?:серия|серии|эпизод)",RegexOptions.IgnoreCase);
+                match=Regex.Match(leaf,@"(?:\bE(?:p(?:isode)?)?[ ._-]*|\bСерия[ ._:-]*)(\d{1,3})(?!\d)|(?<!\d)(\d{1,3})[ ._-]*(?:серия|серии|эпизод)",RegexOptions.IgnoreCase);
                 if(match.Success)episode=int.Parse(match.Groups[1].Success?match.Groups[1].Value:match.Groups[2].Value);
                 else {
-                    string leaf=name.Replace('\\','/').Split('/').Last();
                     match=Regex.Match(leaf,@"^(\d{1,3})(?:[ ._-]|\.[a-z0-9]+$)",RegexOptions.IgnoreCase);
                     if(match.Success)episode=int.Parse(match.Groups[1].Value);
                     else if(Regex.IsMatch(name,@"\b(extras?|bonus|featurette|specials?|бонус|дополнения)\b",RegexOptions.IgnoreCase))continue;
