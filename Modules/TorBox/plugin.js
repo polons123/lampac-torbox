@@ -308,8 +308,18 @@
       // Lampa selects player_torrent when torrent_hash is present.
       var cell = { url: j.url, title: file.name, timeline: fileTimeline(t, file, profile), torrent_hash: t.hash || ('torbox-' + t.id) };
       if (measurement) metrics.resolved(measurement, cell);
+      if (window.lampyrisTorBoxQueue && Lampa.Storage.field('player_torrent') === 'tvos') {
+        window.lampyrisTorBoxQueue(cell, file, (t.files || []).filter(video), infuseMovie(t), function (f) {
+          return fileTimeline(t, f, profile);
+        }, function (id, done, fail) {
+          if (profile !== playbackProfile()) return fail();
+          request('play', { id: t.id, file: id }, function (result) {
+            if (profile === playbackProfile() && result.url) done(result.url); else fail();
+          }, fail);
+        });
+      }
       Lampa.Player.play(cell);
-      Lampa.Player.playlist([cell]);
+      Lampa.Player.playlist(cell.playlist || [cell]);
     }, function () { if (g === generation) back(); });
   }
   var infuseJob = 0;

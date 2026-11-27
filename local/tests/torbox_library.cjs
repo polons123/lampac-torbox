@@ -117,9 +117,9 @@ assert.deepEqual(current.built.results.map((r) => r.title), ['Three']);
 assert(source.includes('cursor + 8'));
 console.log('PASS library filter keeps its own request and resets the page');
 
-const direct = source.slice(source.indexOf('  function playbackProfile()'), source.indexOf('  var infuseJob'));
-const progress = new Map(), cells = [], directRequests = [];
-let activeProfile = 1, signedLink = 0;
+const direct = source.slice(source.indexOf('  function video('), source.indexOf('  function infuseActions('));
+const progress = new Map(), cells = [], playlists = [], directRequests = [];
+let activeProfile = 1, signedLink = 0, torrentPlayer = 'internal';
 const directCtx = {
   Lampa: {
     Account: {Permit: {get profile() {return {id:activeProfile};}}},
@@ -127,21 +127,27 @@ const directCtx = {
       return {hash, time:progress.get(hash)||0, handler(_,time) {progress.set(hash,time);}};
     }},
     Utils: {hash(v) {return v;}},
-    Player: {play(cell) {cells.push(cell);},playlist(list) {assert.strictEqual(list[0],cells.at(-1));}},
+    Player: {play(cell) {cells.push(cell);}, playlist(list) {playlists.push(list);}},
+    Storage: {field(key) {assert.equal(key, 'player_torrent'); return torrentPlayer;}},
     Noty: {show() {}}
   },
   window: {},generation:1,keyIdentity:()=>'fixture-account',
-  request(path,args,done) {assert.equal(path,'play');directRequests.push(()=>done({url:'https://cdn.example/'+(++signedLink)}));}
+  request(path, args, done, fail) {
+    assert.equal(path, 'play');
+    directRequests.push({ args, done: (response = { url: 'https://cdn.example/' + (++signedLink) }) => done(response), fail });
+  }
 };
 vm.createContext(directCtx);
 vm.runInContext(direct, directCtx);
 const torrent = {hash:'abcdef',id:10}, file={name:'film.mkv',id:0};
 function launch(f=file) {
   directCtx.play(torrent,f,()=>{},1,null,directCtx.playbackProfile());
-  directRequests.shift()();
+  directRequests.shift().done();
   return cells.at(-1);
 }
 const startCell=launch();
+assert.strictEqual(playlists.at(-1)[0], startCell);
+assert.equal(playlists.at(-1).length, 1);
 startCell.timeline.handler(50,2537);
 assert.equal(launch().timeline.time,2537);
 assert.notEqual(cells.at(-1).url,startCell.url);
@@ -152,6 +158,50 @@ assert.equal(launch().timeline.time,0);
 const count=cells.length;
 directCtx.play(torrent,file,()=>{},1,null,directCtx.playbackProfile());
 activeProfile=3;
-directRequests.shift()();
+directRequests.shift().done();
 assert.equal(cells.length,count);
 console.log('PASS direct-file progress survives renewed links and isolates files and profiles');
+
+const nextFile = { id: 1, name: 'next.mkv' };
+torrent.files = [file, { id: 2, name: 'captions.srt' }, nextFile];
+torrent.film = { tmdb_id: 42, title: 'Series', media_type: 'tv', year: 2026 };
+let resolveFile;
+directCtx.window.lampyrisTorBoxQueue = (cell, selected, files, movie, timeline, resolve) => {
+  assert.equal(torrentPlayer, 'tvos');
+  assert.strictEqual(selected, file);
+  assert.deepEqual(files.map((entry) => entry.id), [0, 1]);
+  assert.equal(movie.id, 42);
+  assert.notEqual(timeline(nextFile).hash, cell.timeline.hash);
+  resolveFile = resolve;
+  cell.playlist = [cell, { title: nextFile.name }];
+};
+assert.equal(launch().playlist, undefined);
+torrentPlayer = 'tvos';
+const queuedCell = launch();
+assert.strictEqual(playlists.at(-1), queuedCell.playlist);
+assert.equal(directRequests.length, 0);
+const url = 'https://cdn.example/next';
+let resolvedUrl;
+let failures = 0;
+const resolveNext = () => resolveFile(nextFile.id, (value) => { resolvedUrl = value; }, () => { failures++; });
+resolveNext();
+const nextRequest = directRequests.shift();
+assert.equal(nextRequest.args.id, torrent.id);
+assert.equal(nextRequest.args.file, nextFile.id);
+nextRequest.done({ url });
+assert.equal(resolvedUrl, url);
+resolveNext();
+directRequests.shift().fail();
+resolveNext();
+directRequests.shift().done({});
+resolveNext();
+activeProfile++;
+directRequests.shift().done({ url: 'https://cdn.example/stale' });
+resolveNext();
+assert.equal(failures, 4);
+assert.equal(resolvedUrl, url);
+assert.equal(directRequests.length, 0);
+delete directCtx.window.lampyrisTorBoxQueue;
+assert.equal(launch().playlist, undefined);
+assert.equal(playlists.at(-1).length, 1);
+console.log('PASS tvOS queue filters files, resolves links lazily and rejects stale profiles');
